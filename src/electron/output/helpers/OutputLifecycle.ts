@@ -7,6 +7,8 @@ import { initializeSender } from "../../blackmagic/bmdTalk"
 import { CaptureHelper } from "../../capture/CaptureHelper"
 import { NdiSender } from "../../ndi/NdiSender"
 import { setDataNDI } from "../../ndi/talk"
+import { OmtSender } from "../../omt/OmtSender"
+import { setDataOMT } from "../../omt/talk"
 import { wait } from "../../utils/helpers"
 import { outputOptions } from "../../utils/windowOptions"
 import { OutputHelper } from "../OutputHelper"
@@ -140,13 +142,19 @@ export class OutputLifecycle {
             delete this.pendingCaptureStart[id]
 
             if (!CaptureHelper.Lifecycle || !OutputHelper.getOutput(id)) return // window closed before timeout finished
-            CaptureHelper.Lifecycle.startCapture(id, { ndi: output.ndi || false, blackmagic: !!output.blackmagic, webrtc: !!output.webrtcData?.streaming, rtmp: !!output.rtmpData?.streaming })
+            CaptureHelper.Lifecycle.startCapture(id, { ndi: output.ndi || false, omt: output.omt || false, blackmagic: !!output.blackmagic, webrtc: !!output.webrtcData?.streaming, rtmp: !!output.rtmpData?.streaming })
         }, 1200)
 
         // NDI
         if (output.ndi) {
             await NdiSender.createSenderNDI(id, NdiSender.initNameNDI(output.ndiData?.name, output.name), output.ndiData?.groups)
             if (output.ndiData) setDataNDI({ id, ...output.ndiData })
+        }
+
+        // OMT
+        if (output.omt) {
+            await OmtSender.createSenderOMT(id, OmtSender.initNameOMT(output.omtData?.name, output.name), output.omtData?.quality)
+            if (output.omtData) setDataOMT({ id, ...output.omtData })
         }
 
         // Blackmagic
@@ -156,7 +164,7 @@ export class OutputLifecycle {
     // only NDI capture outputs share a render; blackmagic/webrtc/rtmp need dedicated capture,
     // and displayed (non-OSR) outputs need their own window
     private static canShareRender(output: Output): boolean {
-        return !!output.ndi && !output.blackmagic && !output.webrtcData?.streaming && !output.rtmpData?.streaming && this.isOsrOutput(output)
+        return !!output.ndi && !output.omt && !output.blackmagic && !output.webrtcData?.streaming && !output.rtmpData?.streaming && this.isOsrOutput(output)
     }
 
     // a follower references the group renderer's window (never owns/closes it) but registers its own
@@ -253,8 +261,8 @@ export class OutputLifecycle {
     // network/device outputs are capture-only (never shown on a monitor) so they render offscreen.
     // Deliberately reads the PERSISTENT config flags, not the runtime streaming state: OSR mode is
     // fixed at window creation and must not flip when a stream starts/stops.
-    private static isOsrOutput(output: { ndi?: boolean; webrtc?: boolean; rtmp?: boolean; blackmagic?: boolean }): boolean {
-        return !!(output.ndi || output.webrtc || output.rtmp || output.blackmagic)
+    private static isOsrOutput(output: { ndi?: boolean; omt?: boolean; webrtc?: boolean; rtmp?: boolean; blackmagic?: boolean }): boolean {
+        return !!(output.ndi || output.omt || output.webrtc || output.rtmp || output.blackmagic)
     }
 
     // Native OSR render cadence. Connected outputs always render at this rate and each consumer's
@@ -1013,6 +1021,7 @@ export class OutputLifecycle {
 
         CaptureHelper.Lifecycle.stopCapture(id)
         NdiSender.stopSenderNDI(id)
+        OmtSender.stopSenderOMT(id)
         BlackmagicSender.stop(id)
         // free the addon's reused readback buffers for this output (no-op if the addon/pool isn't present)
         try {

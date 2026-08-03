@@ -1406,6 +1406,7 @@
         "bitrate": "Bitrate",
         "video_encoder": "Video encoder",
         "add_destination": "Add destination",
+        "quality": "Quality",
         "device": "Device",
         "display_mode": "Display mode",
         "pixel_format": "Pixel format",

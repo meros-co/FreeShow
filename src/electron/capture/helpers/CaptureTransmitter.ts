@@ -4,6 +4,7 @@ import { OUTPUT_STREAM } from "../../../types/Channels"
 import { BlackmagicSender } from "../../blackmagic/BlackmagicSender"
 import { NdiSender } from "../../ndi/NdiSender"
 import util from "../../ndi/vingester-util"
+import { OmtSender } from "../../omt/OmtSender"
 import { OutputHelper } from "../../output/OutputHelper"
 import { getConnections, getStageStreamSubscriberIds, toServer, toStageStreamSubscribers } from "../../servers"
 import { RtmpStreamer } from "../../streaming/RtmpStreamer"
@@ -52,7 +53,7 @@ export class CaptureTransmitter {
         const captureOptions = OutputHelper.getOutput(captureId)?.captureOptions
         if (!captureOptions) return
 
-        const channelKeys = ["ndi", "blackmagic", "server", "stage", "webrtc", "rtmp"]
+        const channelKeys = ["ndi", "omt", "blackmagic", "server", "stage", "webrtc", "rtmp"]
         channelKeys.forEach((key) => {
             if (captureOptions.options[key]) this.startChannel(captureId, key)
         })
@@ -279,7 +280,7 @@ export class CaptureTransmitter {
 
     // buffer-consumers need only raw BGRA bytes (no NativeImage resize/toJPEG), so on the shared-texture
     // path they can take the readback buffer directly instead of a createFromBitmap -> toBitmap round-trip.
-    private static readonly BUFFER_CONSUMERS = new Set(["ndi", "webrtc", "rtmp", "blackmagic"])
+    private static readonly BUFFER_CONSUMERS = new Set(["ndi", "omt", "webrtc", "rtmp", "blackmagic"])
 
     private static osrModule: any = null
     private static loadOsr(): any {
@@ -387,6 +388,9 @@ export class CaptureTransmitter {
             case "ndi":
                 this.sendRawToNdi(captureId, buffer, size, format)
                 break
+            case "omt":
+                this.sendRawToOmt(captureId, buffer, size)
+                break
             case "webrtc":
                 this.sendRawToWebRtc(captureId, buffer, size, format)
                 break
@@ -431,6 +435,18 @@ export class CaptureTransmitter {
         NdiSender.sendVideoBufferNDI(captureId, Buffer.from(buffer), { size, ratio, framerate, transparent, format })
     }
 
+    // OMT takes BGRA directly (format is always 0 for an omt consumer — getReadbackFormat never routes
+    // UYVY/RGBA to it). Owned copy: the shared readback buffer is recycled and reread by other consumers.
+    private static sendRawToOmt(captureId: string, buffer: Buffer, size: Size) {
+        if (!OmtSender.OMT[captureId]?.sender) return
+        if (this.shouldSkipUnchangedNonBlackmagicFrame("omt", captureId, buffer, size)) return
+        const output = OutputHelper.getOutput(captureId)
+        const ratio = size.height ? size.width / size.height : 16 / 9
+        const transparent = output?.transparent !== false
+        const framerate = output?.captureOptions?.framerates?.omt || 30
+        OmtSender.sendVideoBufferOMT(captureId, Buffer.from(buffer), { size, ratio, framerate, transparent })
+    }
+
 
     private static sendRawToWebRtc(captureId: string, buffer: Buffer, size: Size, format = 0) {
         if (!WebRtcHost.isRunning()) return
@@ -462,6 +478,9 @@ export class CaptureTransmitter {
         switch (key) {
             case "ndi":
                 this.sendBufferToNdi(captureId, image, { size })
+                break
+            case "omt":
+                this.sendBufferToOmt(captureId, image, { size })
                 break
             case "blackmagic":
                 this.sendBufferToBlackmagic(captureId, image)
@@ -506,6 +525,21 @@ export class CaptureTransmitter {
         const framerate = output?.captureOptions?.framerates?.ndi || 30
 
         NdiSender.sendVideoBufferNDI(captureId, buffer, { size, ratio, framerate, transparent })
+    }
+
+    // OMT
+    static sendBufferToOmt(captureId: string, image: NativeImage, { size }: { size: { width: number; height: number } }) {
+        if (!OmtSender.OMT[captureId]?.sender) return
+
+        const buffer = image.toBitmap()
+        if (this.shouldSkipUnchangedNonBlackmagicFrame("omt", captureId, buffer, size)) return
+
+        const output = OutputHelper.getOutput(captureId)
+        const ratio = image.getAspectRatio()
+        const transparent = output?.transparent !== false
+        const framerate = output?.captureOptions?.framerates?.omt || 30
+
+        OmtSender.sendVideoBufferOMT(captureId, buffer, { size, ratio, framerate, transparent })
     }
 
     private static convertToRGBA(buffer: Buffer): void {
