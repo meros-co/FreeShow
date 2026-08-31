@@ -64,8 +64,16 @@ export class NdiSender {
         return this.worker
     }
 
+    // OMT proxy messages (statusOmt/videoDoneOmt/createFailedOmt) are routed to OmtSender via this
+    // registered handler instead of a direct import (avoids an NdiSender<->OmtSender cycle)
+    static auxMessageHandler: ((msg: any) => void) | null = null
+
     private static onWorkerMessage(msg: any) {
         if (!msg?.type) return
+        if (String(msg.type).endsWith("Omt")) {
+            this.auxMessageHandler?.(msg)
+            return
+        }
 
         if (msg.type === "status") {
             const data = this.NDI[msg.id]
@@ -96,6 +104,11 @@ export class NdiSender {
             // main wraps the small image once and fans it out to every group member's server/stage consumers
             CaptureHelper.Transmitter.receiveScaledFrame(msg.members || [msg.id], msg.buffer, msg.byteOffset, msg.byteLength, msg.size)
         }
+    }
+
+    // OMT senders share this worker (same readback per frame for NDI+OMT outputs)
+    static getSharedWorker(): import("worker_threads").Worker | null {
+        return this.getWorker()
     }
 
     static initNameNDI(name?: string, outputName?: string) {
@@ -156,10 +169,12 @@ export class NdiSender {
     // opts.depth = the renderer's derived in-flight depth_r (OutputLifecycle) — sizes the worker's pace queue.
     // opts.memberFramerates = each group member's OWN resolved NDI framerate (configured when connected, idle
     // floor when not) — the worker paces each member's sender at ITS rate, never the renderer's.
-    static captureFrameNDI(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number }) {
+    static captureFrameNDI(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number }) {
         const data = this.NDI[id]
-        if (!data?.sender || !this.worker) return false
-        this.worker.postMessage({ type: "captureFrame", id, source, opts })
+        // opts.omt: the output has an OMT sender in the shared worker, so the capture proceeds even
+        // without an NDI sender (OMT-only off-main output)
+        if ((!data?.sender && !opts.omt) || !this.getWorker()) return false
+        this.worker!.postMessage({ type: "captureFrame", id, source, opts })
         return true
     }
 

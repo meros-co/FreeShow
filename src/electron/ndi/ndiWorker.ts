@@ -43,6 +43,11 @@ type Sender = {
     status?: string
     previousStatus?: string
     sender?: any
+    // protocol adapters, set at creation: NDI = grandiose sender.video/audio, OMT = libomt sender.send.
+    // The pacer/queue machinery below is protocol-agnostic and only ever calls these.
+    sendFrame?: (frame: any) => Promise<void> | void
+    sendAudio?: (frame: any) => Promise<void> | void
+    tsKey?: "timecode" | "timestamp" // frame field re-stamped at send time (NDI vs OMT naming)
     timer?: NodeJS.Timeout
     sendingVideo?: boolean
     pendingVideoFrame?: any
@@ -71,6 +76,34 @@ type Sender = {
     realGaps?: number[] // FS_CAP_STATS: gaps between consecutive REAL send calls this window (mean/p95 reported)
 }
 const NDI: { [id: string]: Sender } = {}
+// OMT senders live in the same worker so an NDI+OMT output shares ONE readback per frame; the pacer,
+// queue and audio machinery are shared via the Sender protocol adapters above
+const OMTS: { [id: string]: Sender } = {}
+
+// dynamic import for the "openmediatransport" ES module (same pattern as grandiose)
+let omtModule: any | null = null
+let omtPromise: Promise<any | null> | null = null
+let omtWarned = false
+const loadOMT = async () => {
+    if (omtModule) return omtModule
+    if (omtPromise) return omtPromise
+
+    omtPromise = import("openmediatransport")
+        .then((imported) => {
+            omtModule = imported
+            return imported
+        })
+        .catch((err: any) => {
+            if (!omtWarned) console.warn("OMT not available:", err?.message || err)
+            omtWarned = true
+            return null
+        })
+        .finally(() => {
+            omtPromise = null
+        })
+
+    return omtPromise
+}
 
 // FS_CAP_STATS: once/sec per sender — sentReal (wire-unique fps), sentRepeat (static re-sends),
 // coalescedReal (real frames lost at the send stage), pacer counters, wireGap (send evenness),
@@ -85,8 +118,8 @@ if (process.env.FS_CAP_STATS) {
         lastCpu = nowCpu
         lastCpuAt = nowAt
         const rb = loadOsrCapture()?._readbackBackend?.() ?? "?"
-        for (const id of Object.keys(NDI)) {
-            const s = NDI[id]
+        const statSenders: [string, Sender][] = [...Object.entries(NDI), ...Object.entries(OMTS).map(([id, s]): [string, Sender] => [`omt#${id}`, s])]
+        for (const [id, s] of statSenders) {
             if (!s?.sender) continue
             const sends = (s.sentReal || 0) + (s.sentRepeat || 0)
             const avg = sends ? Math.round((s.sendMsSum || 0) / sends) : 0
@@ -140,6 +173,9 @@ async function createSender(id: string, name: string, groups?: string) {
         }
 
         NDI[id].sender = sender
+        NDI[id].sendFrame = (frame: any) => sender.video(frame)
+        NDI[id].sendAudio = (frame: any) => sender.audio(frame)
+        NDI[id].tsKey = "timecode"
     } catch (err) {
         console.error("Could not create NDI sender:", err)
         delete NDI[id]
@@ -190,8 +226,15 @@ function stopSender(id: string) {
         s.lastPace = undefined
     }
     delete pacerPools[id] // renderer's pacer free list (members never own one); unreturned bufs just GC
-    // free the worker's reused readback buffers for this output. Off-main uses per-seq slotted keys (id#0/id#1),
-    // each with its own pooled main + scaled buffers, so release every slot ever allocated (high-water mark).
+    delete NDI[id]
+    releaseReadbackResources(id)
+}
+
+// free the worker's reused readback buffers for an output — shared by the NDI and OMT sides, so only
+// release once BOTH senders for the id are gone. Off-main uses per-seq slotted keys (id#0/id#1), each
+// with its own pooled buffers, so release every slot ever allocated (high-water mark).
+function releaseReadbackResources(id: string) {
+    if (NDI[id] || OMTS[id]) return
     try {
         const osr = loadOsrCapture()
         osr?.releasePool?.(id)
@@ -201,11 +244,10 @@ function stopSender(id: string) {
         // ignore
     }
     delete readbackSlots[id]
-    delete NDI[id]
 }
 
-async function sendQueuedVideoFrame(id: string) {
-    const senderData = NDI[id]
+async function sendQueuedVideoFrame(reg: { [id: string]: Sender }, id: string, doneType: string) {
+    const senderData = reg[id]
     if (!senderData?.sender || senderData.sendingVideo) return
 
     const frame = senderData.pendingVideoFrame
@@ -219,9 +261,9 @@ async function sendQueuedVideoFrame(id: string) {
 
     const sendT0 = process.env.FS_CAP_STATS ? Date.now() : 0
     try {
-        await senderData.sender.video(frame)
+        await (senderData.sendFrame ? senderData.sendFrame(frame) : senderData.sender.video(frame))
     } catch (err) {
-        console.error("Error sending NDI video frame:", err)
+        console.error("Error sending video frame:", err)
     } finally {
         if (sendT0) {
             senderData.sendMsSum = (senderData.sendMsSum || 0) + (Date.now() - sendT0)
@@ -231,8 +273,8 @@ async function sendQueuedVideoFrame(id: string) {
         senderData.sendingVideo = false
         // videoDone only drives the MAIN-path in-flight counter; the off-main capture path uses captureDone
         // instead, so posting videoDone for it just floods the main thread (~100 useless msgs/s at 2 outputs).
-        if (!senderData.offMain) port.postMessage({ type: "videoDone", id })
-        if (senderData.pendingVideoFrame) void sendQueuedVideoFrame(id)
+        if (!senderData.offMain) port.postMessage({ type: doneType, id })
+        if (senderData.pendingVideoFrame) void sendQueuedVideoFrame(reg, id, doneType)
     }
 }
 
@@ -350,8 +392,166 @@ async function sendVideoBuffer(id: string, buffer: Buffer, { size, ratio, framer
         data
     }
 
-    void sendQueuedVideoFrame(id)
+    void sendQueuedVideoFrame(NDI, id, "videoDone")
 }
+
+// ---- OMT sender lifecycle + main-path sends --------------------------------------------------------------
+
+function mapOmtQuality(omt: any, quality?: number | string): number {
+    if (typeof quality === "number") return quality
+    const q = omt.Quality
+    switch (String(quality || "").toLowerCase()) {
+        case "low":
+            return q.Low
+        case "medium":
+            return q.Medium
+        case "high":
+            return q.High
+        default:
+            return q.Default
+    }
+}
+
+async function createOmtSender(id: string, name: string, quality?: number | string) {
+    if (OMTS[id]) stopOmtSender(id)
+
+    OMTS[id] = { name }
+    console.info("OMT - creating sender: " + name)
+
+    try {
+        const omt = await loadOMT()
+        if (!omt) {
+            delete OMTS[id]
+            port.postMessage({ type: "createFailedOmt", id })
+            return
+        }
+
+        const sender = new omt.Sender(name, mapOmtQuality(omt, quality))
+
+        // destroyOmt arriving while the create was in progress: destroy instead of leaking
+        if (!OMTS[id]) {
+            try {
+                sender.destroy()
+            } catch {}
+            return
+        }
+
+        OMTS[id].sender = sender
+        OMTS[id].sendFrame = (frame: any) => sender.send(frame)
+        OMTS[id].sendAudio = (frame: any) => sender.send(frame)
+        OMTS[id].tsKey = "timestamp"
+    } catch (err) {
+        console.error("Could not create OMT sender:", err)
+        delete OMTS[id]
+        port.postMessage({ type: "createFailedOmt", id })
+        return
+    }
+
+    OMTS[id].timer = setInterval(() => {
+        if (!OMTS[id]?.sender) return
+        const conns: number = OMTS[id].sender?.connections || 0
+        OMTS[id].status = conns > 0 ? "connected" : "unconnected"
+
+        const newStatus = String(OMTS[id].status) + conns.toString()
+        if (newStatus !== OMTS[id].previousStatus) {
+            port.postMessage({ type: "statusOmt", id, status: OMTS[id].status, connections: conns })
+            OMTS[id].previousStatus = newStatus
+            if (OMTS[id].status === "connected") console.log(`[OMT] Reconnected for ${id}`)
+        }
+    }, CONNECTION_POLL_INTERVAL_MS)
+}
+
+function stopOmtSender(id: string) {
+    if (!OMTS[id]) return
+    console.info("OMT - stopping sender: " + (OMTS[id].name || id))
+    if (OMTS[id].timer) clearInterval(OMTS[id].timer)
+
+    if (OMTS[id].sender) {
+        try {
+            OMTS[id].sender.destroy()
+        } catch (err) {
+            console.error("ERROR", err)
+        }
+    }
+
+    const s = OMTS[id]
+    if (s.paceTimer) clearTimeout(s.paceTimer)
+    for (const entry of s.paceQueue || []) releasePacerRef(entry.pbuf)
+    s.paceQueue = []
+    if (s.lastPace) {
+        releasePacerRef(s.lastPace.pbuf)
+        s.lastPace = undefined
+    }
+    delete pacerPools[`omt#${id}`]
+    delete OMTS[id]
+    releaseReadbackResources(id)
+}
+
+// builds the OMT video frame template (BGRA; the timestamp is re-stamped at send time by the pacer/queue)
+function makeOmtVideoFrame(omt: any, buffer: Buffer, size: { width: number; height: number }, ratio: number, framerate: number, transparent: boolean) {
+    return {
+        type: omt.FrameType.Video,
+        timestamp: (timeStart + process.hrtime.bigint()) / TIMECODE_DIVISOR,
+        codec: omt.Codec.BGRA,
+        width: size.width,
+        height: size.height,
+        stride: size.width * 4,
+        flags: transparent ? omt.VideoFlags.Alpha : omt.VideoFlags.None,
+        frameRateN: Math.round(framerate * 1000),
+        frameRateD: 1000,
+        aspectRatio: ratio,
+        colorSpace: omt.ColorSpace.Undefined,
+        data: buffer
+    }
+}
+
+// main-path OMT video (mixed outputs that stay on the main capture path): BGRA in, latest-wins pending slot
+async function sendOmtVideoBuffer(id: string, buffer: Buffer, { size, ratio, framerate, transparent }: { size: { width: number; height: number }; ratio: number; framerate: number; transparent: boolean }) {
+    const senderData = OMTS[id]
+    if (!senderData?.sender) return
+    senderData.offMain = false
+
+    const omt = await loadOMT()
+    if (!omt) return
+
+    if (senderData.pendingVideoFrame && senderData.pendingReal) senderData.coalescedReal = (senderData.coalescedReal || 0) + 1
+    senderData.pendingReal = true
+    senderData.pendingVideoFrame = makeOmtVideoFrame(omt, buffer, size, ratio, framerate, transparent)
+
+    void sendQueuedVideoFrame(OMTS, id, "videoDoneOmt")
+}
+
+// broadcast planar Float32 (FPA1) audio to every OMT sender, via each sender's serial audio queue
+async function sendOmtAudioBuffer(buffer: Buffer, { sampleRate, channelCount }: { sampleRate: number; channelCount: number }) {
+    const hasSender = Object.values(OMTS).some((s) => s?.sender)
+    if (!hasSender || !buffer || buffer.length === 0) return
+
+    const omt = await loadOMT()
+    if (!omt) return
+
+    const samplesPerChannel = Math.trunc(buffer.byteLength / channelCount / BYTES_PER_FLOAT32)
+    if (samplesPerChannel <= 0) return
+
+    const frame = {
+        type: omt.FrameType.Audio,
+        timestamp: (timeStart + process.hrtime.bigint()) / TIMECODE_DIVISOR,
+        codec: omt.Codec.FPA1,
+        sampleRate,
+        channels: channelCount,
+        samplesPerChannel,
+        data: buffer
+    }
+
+    Object.keys(OMTS).forEach((id) => {
+        const senderData = OMTS[id]
+        if (!senderData?.sender) return
+
+        if (!senderData.audioQueue) senderData.audioQueue = []
+        senderData.audioQueue.push({ ...frame })
+        void sendQueuedAudioFrame(OMTS, id)
+    })
+}
+// ---- end OMT ---------------------------------------------------------------------------------------------
 
 // free readback-slot pool per output: concurrent captures can finish out of order, so each needs a
 // distinct osr-capture key. Allocated on demand (main bounds concurrency with its in-flight depth);
@@ -398,29 +598,29 @@ function releasePacerRef(pb: PacerBuf) {
 // drift-corrected pace loop: ticks are scheduled against an ABSOLUTE timeline (nextDue += interval), so
 // setTimeout callback latency never accumulates into cadence drift. If the loop falls behind (event-loop
 // stall), it RESYNCS to now + interval — never burst-fires to catch up (each tick sends exactly one frame).
-function startPacer(id: string) {
-    const s = NDI[id]
+function startPacer(reg: { [id: string]: Sender }, id: string) {
+    const s = reg[id]
     if (!s || s.paceTimer) return
     s.paceNextDue = Date.now() + (s.paceInterval || 1000 / 30)
-    schedulePaceTick(id)
+    schedulePaceTick(reg, id)
 }
-function schedulePaceTick(id: string) {
-    const s = NDI[id]
+function schedulePaceTick(reg: { [id: string]: Sender }, id: string) {
+    const s = reg[id]
     if (!s) return
     const delay = Math.max(0, (s.paceNextDue || 0) - Date.now())
     s.paceTimer = setTimeout(() => {
-        const sd = NDI[id]
+        const sd = reg[id]
         if (!sd) return // stopped
         const interval = sd.paceInterval || 1000 / 30
         sd.paceNextDue = (sd.paceNextDue || Date.now()) + interval
         if (sd.paceNextDue < Date.now()) sd.paceNextDue = Date.now() + interval // resync, don't burst
-        paceTick(id)
-        schedulePaceTick(id)
+        paceTick(reg, id)
+        schedulePaceTick(reg, id)
     }, delay)
 }
 
-function paceTick(id: string) {
-    const s = NDI[id]
+function paceTick(reg: { [id: string]: Sender }, id: string) {
+    const s = reg[id]
     if (!s?.sender) return
     if (s.sendingVideo) {
         // previous send still in flight — skip this tick; the frame re-quantizes to the next one
@@ -431,7 +631,7 @@ function paceTick(id: string) {
     const entry = s.paceQueue?.shift()
     if (entry) {
         // real frame: the queue's ref TRANSFERS to the send (released in paceSend's finally)
-        void paceSend(id, entry, true)
+        void paceSend(reg, id, entry, true)
         return
     }
     if (s.lastPace) {
@@ -439,12 +639,12 @@ function paceTick(id: string) {
         // take a send-ref so the buffer stays valid even if lastPace is replaced mid-send.
         s.paceMisses = (s.paceMisses || 0) + 1
         s.lastPace.pbuf.refs++
-        void paceSend(id, s.lastPace, false)
+        void paceSend(reg, id, s.lastPace, false)
     }
 }
 
-async function paceSend(id: string, entry: { frame: any; pbuf: PacerBuf }, real: boolean) {
-    const senderData = NDI[id]
+async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { frame: any; pbuf: PacerBuf }, real: boolean) {
+    const senderData = reg[id]
     if (!senderData?.sender) {
         releasePacerRef(entry.pbuf)
         return
@@ -456,13 +656,13 @@ async function paceSend(id: string, entry: { frame: any; pbuf: PacerBuf }, real:
         if (process.env.FS_CAP_STATS && senderData.lastRealSendAt) (senderData.realGaps ||= []).push(now - senderData.lastRealSendAt)
         senderData.lastRealSendAt = now
     }
-    // fresh timecode at SEND time for real and repeat alike — the wire cadence is the pacer's, not the capture's
-    const frame = { ...entry.frame, timecode: (timeStart + process.hrtime.bigint()) / TIMECODE_DIVISOR }
+    // fresh timestamp at SEND time for real and repeat alike — the wire cadence is the pacer's, not the capture's
+    const frame = { ...entry.frame, [senderData.tsKey || "timecode"]: (timeStart + process.hrtime.bigint()) / TIMECODE_DIVISOR }
     const sendT0 = process.env.FS_CAP_STATS ? Date.now() : 0
     try {
-        await senderData.sender.video(frame)
+        await (senderData.sendFrame ? senderData.sendFrame(frame) : senderData.sender.video(frame))
     } catch (err) {
-        console.error("Error sending NDI video frame:", err)
+        console.error("Error sending video frame:", err)
     } finally {
         if (sendT0) {
             senderData.sendMsSum = (senderData.sendMsSum || 0) + (Date.now() - sendT0)
@@ -478,14 +678,17 @@ async function paceSend(id: string, entry: { frame: any; pbuf: PacerBuf }, real:
 // off-main capture-and-send: the worker reads back the shared texture AND sends, so the main process
 // never touches frame data — it only forwards the texture handle (Windows/mac shared handle, Linux
 // { planes, modifier }). The addon converts to UYVY/UYVA on the GPU during readback.
-async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number }) {
+async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number }) {
     // seq identifies this in-flight capture; the osr-capture key is slotted so concurrent readbacks
     // for one output use independent pool entries
     const seq = opts.seq ?? 0
     const senderData = NDI[id]
+    const omtData = opts.omt ? OMTS[id] : undefined
     const osr = loadOsrCapture()
-    const grandiose = await loadGrandiose()
-    if (!senderData?.sender || !osr?.readback || !grandiose) {
+    const grandiose = senderData?.sender ? await loadGrandiose() : null
+    const hasNdi = !!senderData?.sender && !!grandiose
+    const hasOmt = !!omtData?.sender
+    if ((!hasNdi && !hasOmt) || !osr?.readback) {
         port.postMessage({ type: "releaseTexture", id, seq })
         port.postMessage({ type: "captureDone", id, seq })
         return
@@ -502,7 +705,8 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
     // concurrent captures always use distinct keys
     const slot = acquireReadbackSlot(id)
     const rbKey = `${id}#${slot}`
-    senderData.offMain = true
+    if (senderData) senderData.offMain = true
+    if (omtData) omtData.offMain = true
     // prefer the two-phase path: its consume callback releases the Electron texture synchronously at
     // the GPU-done boundary. readbackOnce's mid-Execute callback only schedules the release behind
     // other worker-loop work, which was measured to starve the compositor frame pool.
@@ -571,15 +775,26 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             port.postMessage({ type: "scaledFrame", id, members, buffer: scaled.buffer, byteOffset: scaled.byteOffset, byteLength: scaled.byteLength, size: { width: dstW, height: dstH } })
         }
 
-        const fourCC: number = format === 2 ? grandiose.FOURCC_UYVA : grandiose.FOURCC_UYVY
-
         // pacer hand-off: copy the pooled readback buffer once into a pacer-owned recycled Buffer and
         // enqueue that — the addon slot is free to recycle at captureDone (below) without any frame the
         // pacer still holds ever tearing. ONE refcounted copy is shared across all fan-out members.
-        const activeMembers = members.filter((m) => NDI[m]?.sender)
+        const activeMembers = hasNdi ? members.filter((m) => NDI[m]?.sender) : []
         if (activeMembers.length) {
-            const pbuf = acquirePacerBuf(id, buffer.length)
-            buffer.copy(pbuf.buf, 0, 0, buffer.length)
+            // when the readback is BGRA (format 0: shared with an OMT sender that needs BGRA), convert to
+            // NDI's UYVY/UYVA here (native osr-capture converter, JS fallback) — one convert per frame,
+            // still off the main thread
+            let ndiBuffer = buffer
+            let ndiFormat = format
+            if (format === 0) {
+                const useAlpha = opts.transparent !== false
+                ndiBuffer = useAlpha
+                    ? (osr.convertBgraToUyva ? osr.convertBgraToUyva(buffer, size.width, size.height) : bgraToUyva(buffer, size.width, size.height))
+                    : (osr.convertBgraToUyvy ? osr.convertBgraToUyvy(buffer, size.width, size.height) : bgraToUyvy(buffer, size.width, size.height))
+                ndiFormat = useAlpha ? 2 : 1
+            }
+            const fourCC: number = ndiFormat === 2 ? grandiose.FOURCC_UYVA : grandiose.FOURCC_UYVY
+            const pbuf = acquirePacerBuf(id, ndiBuffer.length)
+            ndiBuffer.copy(pbuf.buf, 0, 0, ndiBuffer.length)
             // frame template — timecode is re-stamped at each send (the pacer owns the wire cadence)
             const frame = {
                 timecode: (timeStart + process.hrtime.bigint()) / TIMECODE_DIVISOR,
@@ -596,6 +811,7 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             for (const m of activeMembers) {
                 const md = NDI[m]!
                 md.offMain = true
+                md.tsKey ||= "timecode"
                 // per-member pace rate: each member's sender paces at its own
                 // resolved framerate (configured when connected, idle floor when not) — never the renderer's
                 // (an unconnected renderer's 1fps floor used to coalesce a connected follower's 60fps stream
@@ -607,7 +823,7 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
                 if (md.paceTimer && md.paceNextDue && md.paceNextDue > Date.now() + md.paceInterval) {
                     clearTimeout(md.paceTimer)
                     md.paceTimer = undefined
-                    startPacer(m)
+                    startPacer(NDI, m)
                 }
                 const mFrame = mfr === framerate ? frame : { ...frame, frameRateN: mfr * 1000 }
                 // queue capacity = the renderer's DERIVED depth_r (passed from main) + 1 [UNIVERSAL headroom].
@@ -626,12 +842,44 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
                 pbuf.refs++ // lastPace pin's ref (repeats only fire when the queue is empty, i.e. this
                 if (md.lastPace) releasePacerRef(md.lastPace.pbuf) // frame has already been sent or dropped)
                 md.lastPace = { frame: mFrame, pbuf }
-                startPacer(m)
+                startPacer(NDI, m)
+            }
+        }
+
+        // OMT fan-out: the sender takes the BGRA readback directly (format 0 is guaranteed by main when an
+        // OMT sender is active); its own pacer paces at the OMT-configured rate with its own refcounted copy
+        if (hasOmt && format === 0) {
+            const omt = await loadOMT()
+            if (omt) {
+                const od = OMTS[id]!
+                const obuf = acquirePacerBuf(`omt#${id}`, buffer.length)
+                buffer.copy(obuf.buf, 0, 0, buffer.length)
+                const ofr = Math.max(1, opts.omtFramerate || framerate)
+                od.paceInterval = 1000 / ofr
+                if (od.paceTimer && od.paceNextDue && od.paceNextDue > Date.now() + od.paceInterval) {
+                    clearTimeout(od.paceTimer)
+                    od.paceTimer = undefined
+                    startPacer(OMTS, id)
+                }
+                const oFrame = makeOmtVideoFrame(omt, obuf.buf, size, ratio, ofr, opts.transparent !== false)
+                od.paceCap = Math.max(2, (opts.depth ?? 1) + 1)
+                const oQueue = (od.paceQueue ||= [])
+                while (oQueue.length >= od.paceCap) {
+                    const dropped = oQueue.shift()!
+                    releasePacerRef(dropped.pbuf)
+                    od.coalescedReal = (od.coalescedReal || 0) + 1
+                }
+                obuf.refs++ // queue entry's ref
+                oQueue.push({ frame: oFrame, pbuf: obuf })
+                obuf.refs++ // lastPace pin's ref
+                if (od.lastPace) releasePacerRef(od.lastPace.pbuf)
+                od.lastPace = { frame: oFrame, pbuf: obuf }
+                startPacer(OMTS, id)
             }
         }
         if (tl) tl.enq = Date.now() // pacer enqueue complete (memcpy + fan-out done) — nonzero = clean path
     } catch (err) {
-        console.error("NDI worker readback error:", err)
+        console.error("Worker readback error:", err)
     } finally {
         releaseTexture() // safety: ensure the texture is released even on error
         releaseReadbackSlot(id, slot)
@@ -645,15 +893,15 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
 // old pcm-convert step and the audioSamplesSent timecode-drift logic are gone upstream — frames carry no
 // timecode and NDI stamps them at send time). Each sender has its own FIFO audioQueue drained by a serial
 // send loop, with a hard cap so a stalled sender can't accumulate unbounded memory/latency.
-async function sendQueuedAudioFrame(id: string) {
-    const senderData = NDI[id]
+async function sendQueuedAudioFrame(reg: { [id: string]: Sender }, id: string) {
+    const senderData = reg[id]
     if (!senderData?.sender || senderData.sendingAudio) return
 
     senderData.sendingAudio = true
 
     try {
         while (senderData.audioQueue && senderData.audioQueue.length > 0) {
-            if (!NDI[id]?.sender) break
+            if (!reg[id]?.sender) break
 
             // Limit queue to prevent excessive memory/latency if sending is falling behind
             if (senderData.audioQueue.length > 50) {
@@ -662,15 +910,15 @@ async function sendQueuedAudioFrame(id: string) {
 
             const frame = senderData.audioQueue.shift()
             if (frame) {
-                await senderData.sender.audio(frame)
+                await (senderData.sendAudio ? senderData.sendAudio(frame) : senderData.sender.audio(frame))
             }
         }
     } catch (err) {
-        console.error("Error sending NDI audio frame:", err)
+        console.error("Error sending audio frame:", err)
     } finally {
         senderData.sendingAudio = false
-        if (NDI[id]?.sender && senderData.audioQueue && senderData.audioQueue.length > 0) {
-            void sendQueuedAudioFrame(id)
+        if (reg[id]?.sender && senderData.audioQueue && senderData.audioQueue.length > 0) {
+            void sendQueuedAudioFrame(reg, id)
         }
     }
 }
@@ -703,7 +951,7 @@ async function sendAudioBufferTarget(id: string, buffer: Buffer, { sampleRate, c
 
     if (!senderData.audioQueue) senderData.audioQueue = []
     senderData.audioQueue.push(frame)
-    void sendQueuedAudioFrame(id)
+    void sendQueuedAudioFrame(NDI, id)
 }
 
 async function sendAudioBuffer(buffer: Buffer, { sampleRate, channelCount }: { sampleRate: number; channelCount: number }) {
@@ -719,7 +967,7 @@ async function sendAudioBuffer(buffer: Buffer, { sampleRate, channelCount }: { s
 
         if (!senderData.audioQueue) senderData.audioQueue = []
         senderData.audioQueue.push({ ...frame })
-        void sendQueuedAudioFrame(id)
+        void sendQueuedAudioFrame(NDI, id)
     })
 }
 // ---- end audio -------------------------------------------------------------------------------------------
@@ -743,6 +991,18 @@ port.on("message", (msg: any) => {
             break
         case "destroy":
             stopSender(msg.id)
+            break
+        case "createOmt":
+            void createOmtSender(msg.id, msg.name, msg.quality)
+            break
+        case "videoOmt":
+            void sendOmtVideoBuffer(msg.id, Buffer.from(msg.buffer, msg.byteOffset, msg.byteLength), msg.opts)
+            break
+        case "audioOmt":
+            void sendOmtAudioBuffer(Buffer.from(msg.buffer, msg.byteOffset, msg.byteLength), msg.opts)
+            break
+        case "destroyOmt":
+            stopOmtSender(msg.id)
             break
     }
 })

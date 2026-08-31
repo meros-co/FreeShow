@@ -110,18 +110,18 @@ export class CaptureTransmitter {
         return 0
     }
 
-    // Off-main eligibility for a mixed output: an output with an NDI sender can run its WHOLE frame pipeline
-    // off the main thread IFF its only non-NDI consumers are server/stage. The worker reads back UYVY/UYVA for
-    // NDI AND a GPU-downscaled small BGRA (for server/stage) in one pass. Returns the heavy consumer keys
-    // (empty for an NDI-only output), or null when a consumer that needs the full-res main path
+    // Off-main eligibility for a mixed output: an output with an NDI/OMT sender can run its WHOLE frame
+    // pipeline off the main thread IFF its only other consumers are server/stage. The worker reads back the
+    // frame AND a GPU-downscaled small BGRA (for server/stage) in one pass. Returns the heavy consumer keys
+    // (empty for an NDI/OMT-only output), or null when a consumer that needs the full-res main path
     // (webrtc/rtmp/blackmagic) is present, so the caller keeps the main path.
     static getHeavyOffMainConsumers(captureId: string): string[] | null {
-        const nonNdi = Object.keys(this.channels)
+        const heavy = Object.keys(this.channels)
             .filter((k) => k.startsWith(`${captureId}-`))
             .map((k) => this.channels[k].key)
-            .filter((key) => key !== "ndi")
-        if (nonNdi.some((key) => key !== "server" && key !== "stage")) return null
-        return nonNdi
+            .filter((key) => key !== "ndi" && key !== "omt")
+        if (heavy.some((key) => key !== "server" && key !== "stage")) return null
+        return heavy
     }
 
     // The GPU downscale target for the off-main scaled buffer (server/stage): cap width so only a few MB cross
@@ -140,12 +140,12 @@ export class CaptureTransmitter {
     static groupOffMainInfo(memberIds: string[]): { eligible: boolean; needsScaled: boolean } {
         let needsScaled = false
         for (const id of memberIds) {
-            const nonNdi = Object.keys(this.channels)
+            const heavy = Object.keys(this.channels)
                 .filter((k) => k.startsWith(`${id}-`))
                 .map((k) => this.channels[k].key)
-                .filter((key) => key !== "ndi")
-            if (nonNdi.some((key) => key !== "server" && key !== "stage")) return { eligible: false, needsScaled: false }
-            if (nonNdi.length) needsScaled = true
+                .filter((key) => key !== "ndi" && key !== "omt")
+            if (heavy.some((key) => key !== "server" && key !== "stage")) return { eligible: false, needsScaled: false }
+            if (heavy.length) needsScaled = true
         }
         return { eligible: true, needsScaled }
     }
@@ -530,6 +530,8 @@ export class CaptureTransmitter {
     // OMT
     static sendBufferToOmt(captureId: string, image: NativeImage, { size }: { size: { width: number; height: number } }) {
         if (!OmtSender.OMT[captureId]?.sender) return
+        // skip the toBitmap readback for frames the busy worker would drop anyway
+        if (OmtSender.isBusyOMT(captureId)) return
 
         const buffer = image.toBitmap()
         if (this.shouldSkipUnchangedNonBlackmagicFrame("omt", captureId, buffer, size)) return

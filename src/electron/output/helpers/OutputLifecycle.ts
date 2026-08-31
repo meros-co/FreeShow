@@ -696,20 +696,24 @@ export class OutputLifecycle {
             const framerate = output?.captureOptions?.framerates?.ndi || 30
             const ratio = height ? width / height : 16 / 9
             const transparent = output?.transparent === true
-            // NDI gets GPU-converted UYVY/UYVA; a mixed output also gets a small BGRA GPU-downscale for
-            // server/stage in the same readback pass
-            const fmt = transparent ? 2 : 1
+            // NDI-only outputs get GPU-converted UYVY/UYVA. With an OMT sender active the readback stays
+            // BGRA (OMT's wire format) and the worker converts for NDI off-main; a mixed output also gets
+            // a small BGRA GPU-downscale for server/stage in the same readback pass.
+            const hasOmt = !!OmtSender.OMT[id]?.sender
+            const omtFramerate = output?.captureOptions?.framerates?.omt || framerate
+            const fmt = hasOmt ? 0 : transparent ? 2 : 1
             const members = NdiSender.NDI[id]?.sender ? RenderGroups.members(id).filter((m) => m === id || (OutputHelper.getOutput(m) as any)?.renderGroupRenderer === id) : []
             // send pace rate is PER MEMBER: each member's sender paces at its own resolved rate
             // (configured framerate when connected, idle floor when not) — sourcing one rate from the
             // renderer let an unconnected renderer's idle floor pace a connected follower at 1fps
             const memberFramerates: { [m: string]: number } = {}
             for (const m of members) memberFramerates[m] = OutputHelper.getOutput(m)?.captureOptions?.framerates?.ndi || framerate
-            const groupInfo = members.length ? CaptureHelper.Transmitter.groupOffMainInfo(members) : null
+            const groupIds = members.length ? members : hasOmt ? [id] : []
+            const groupInfo = groupIds.length ? CaptureHelper.Transmitter.groupOffMainInfo(groupIds) : null
             const mixed = !!groupInfo && groupInfo.eligible && groupInfo.needsScaled && typeof addon.readbackConsume === "function"
             const scaled = mixed ? CaptureHelper.Transmitter.getScaledTarget({ width, height }) : null
             const seq = ++offMainSeq
-            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: fmt, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id) })) {
+            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: fmt, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate })) {
                 // uncontended = nothing in flight anywhere at admission → near-pure service time,
                 // the minRtt estimator's only valid samples
                 forwardAt.set(seq, { t: Date.now(), unc: OutputLifecycle.globalInFlight === 0, px: width * height })
@@ -871,12 +875,13 @@ export class OutputLifecycle {
             // ask the addon to convert straight to NDI/SDI's UYVY/UYVA when a single such consumer is active
             const requestedFormat = CaptureHelper.Transmitter.getReadbackFormat(id, { width, height })
 
-            // off-main capture: when an NDI output's only other consumers are server/stage, the entire
-            // per-frame pipeline (readback + convert + downscale) runs in the worker — the main process
-            // only forwards the texture handle. With shared-render the renderer captures once and the
-            // readback fans out to every group member (`members` is [id] when sharing is off).
+            // off-main capture: when an NDI and/or OMT output's only other consumers are server/stage,
+            // the entire per-frame pipeline (readback + convert + downscale) runs in the worker — the
+            // main process only forwards the texture handle. With shared-render the renderer captures
+            // once and the readback fans out to every group member (`members` is [id] when sharing is off).
             const members = NdiSender.NDI[id]?.sender ? RenderGroups.members(id).filter((m) => m === id || (OutputHelper.getOutput(m) as any)?.renderGroupRenderer === id) : []
-            const groupInfo = members.length ? CaptureHelper.Transmitter.groupOffMainInfo(members) : null
+            const offMainIds = members.length ? members : OmtSender.OMT[id]?.sender ? [id] : []
+            const groupInfo = offMainIds.length ? CaptureHelper.Transmitter.groupOffMainInfo(offMainIds) : null
             const hasGpuDownscale = typeof addon.readbackConsume === "function"
             // (the mixed/scaled readback shape is recomputed in forwardOffMain at forward time)
             const canOffMain = !!groupInfo && groupInfo.eligible && (!groupInfo.needsScaled || hasGpuDownscale)
