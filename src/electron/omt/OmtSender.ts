@@ -1,193 +1,113 @@
-import os from "os"
 import { toApp } from ".."
 import { CaptureHelper } from "../capture/CaptureHelper"
-import util from "../ndi/vingester-util"
-
-// Dynamic import for the "openmediatransport" ES module (same pattern as grandiose/NDI)
-let warned = false
-let omtModule: any | null = null
-let omtPromise: Promise<any | null> | null = null
-const loadOMT = async () => {
-    if (omtModule) return omtModule
-    if (omtPromise) return omtPromise
-
-    omtPromise = import("openmediatransport")
-        .then((imported) => {
-            omtModule = imported
-            return imported
-        })
-        .catch((err: any) => {
-            if (!warned) console.warn("OMT not available:", err?.message || err)
-            warned = true
-            return null
-        })
-        .finally(() => {
-            omtPromise = null
-        })
-
-    return omtPromise
-}
+import { NdiSender } from "../ndi/NdiSender"
 
 // Resources:
 // https://github.com/openmediatransport/libomtnet
 // https://github.com/schplay/openmediatransport-node
 
+// The OMT engine (libomt sender lifecycle, send-dispatch, pacer) runs in the shared NDI/OMT
+// worker_thread (../ndi/ndiWorker) so it stays OFF the main thread — an NDI+OMT output shares one
+// readback per frame there. This class is the thin main-thread proxy, mirroring NdiSender: it forwards
+// create/video/audio/destroy messages, keeps a lightweight mirror of each sender (name/status/busy) and
+// relays connection status back to the app.
+
 export class OmtSender {
-    private static readonly BYTES_PER_FLOAT32 = 4
-    private static readonly CONNECTION_POLL_INTERVAL_MS = 1000
-    private static readonly TIMESTAMP_DIVISOR = BigInt(100) // OMT timestamp unit: 1 second = 10,000,000 (100ns)
+    private static readonly MAX_INFLIGHT_SENDS = 3
 
-    static timeStart = BigInt(Date.now()) * BigInt(1e6) - process.hrtime.bigint()
-
+    // main-side mirror of the worker's OMT senders
     static OMT: {
         [key: string]: {
             name: string
-            quality?: number
-            sender?: any
-            timer?: NodeJS.Timeout
+            quality?: number | string
             status?: string
             previousStatus?: string
+            sender?: boolean
+            inFlight?: number
+            connections?: number
         }
     } = {}
 
-    private static getTimestamp(): bigint {
-        return (this.timeStart + process.hrtime.bigint()) / this.TIMESTAMP_DIVISOR
+    private static handlerRegistered = false
+    private static getWorker() {
+        if (!this.handlerRegistered) {
+            NdiSender.auxMessageHandler = (msg: any) => this.onWorkerMessage(msg)
+            this.handlerRegistered = true
+        }
+        return NdiSender.getSharedWorker()
+    }
+
+    private static onWorkerMessage(msg: any) {
+        if (msg.type === "statusOmt") {
+            const data = this.OMT[msg.id]
+            if (!data) return
+
+            data.status = msg.status
+            data.connections = msg.connections
+            const newStatus = String(msg.status) + String(msg.connections)
+            if (newStatus !== data.previousStatus) {
+                toApp("OMT", { channel: "SEND_DATA", data: { id: msg.id, status: msg.status, connections: msg.connections } })
+                CaptureHelper.updateFramerate(msg.id)
+                data.previousStatus = newStatus
+            }
+        } else if (msg.type === "createFailedOmt") {
+            delete this.OMT[msg.id]
+        } else if (msg.type === "videoDoneOmt") {
+            const data = this.OMT[msg.id]
+            if (data) data.inFlight = Math.max(0, (data.inFlight ?? 0) - 1)
+        }
     }
 
     static initNameOMT(name?: string, outputName?: string) {
         return name || `FreeShow OMT${outputName ? ` - ${outputName}` : ""}`
     }
 
-    private static mapQuality(omt: any, quality?: number | string): number {
-        if (typeof quality === "number") return quality
-        const q = omt.Quality
-        switch (String(quality || "").toLowerCase()) {
-            case "low":
-                return q.Low
-            case "medium":
-                return q.Medium
-            case "high":
-                return q.High
-            default:
-                return q.Default
-        }
+    static isBusyOMT(id: string): boolean {
+        return (this.OMT[id]?.inFlight ?? 0) >= this.MAX_INFLIGHT_SENDS
     }
 
     static async createSenderOMT(id: string, name = "", quality?: number | string) {
-        if (this.OMT[id]) return
+        if (this.OMT[id]) this.stopSenderOMT(id)
 
-        this.OMT[id] = { name }
-        console.info("OMT - creating sender: " + name)
+        const worker = this.getWorker()
+        if (!worker) return
 
-        try {
-            const omt = await loadOMT()
-            if (!omt) return
-
-            const qualityValue = this.mapQuality(omt, quality)
-            this.OMT[id].quality = qualityValue
-            this.OMT[id].sender = new omt.Sender(name, qualityValue)
-        } catch (err) {
-            console.error("Could not create OMT sender:", err)
-            delete this.OMT[id]
-            return
-        }
-
-        this.OMT[id].timer = setInterval(() => {
-            /*  poll OMT for connections  */
-            const conns: number = this.OMT[id]?.sender?.connections || 0
-            this.OMT[id].status = conns > 0 ? "connected" : "unconnected"
-
-            const newStatus = String(this.OMT[id].status) + conns.toString()
-            if (newStatus !== this.OMT[id].previousStatus) {
-                toApp("OMT", { channel: "SEND_DATA", data: { id, status: this.OMT[id].status, connections: conns } })
-                CaptureHelper.updateFramerate(id)
-
-                this.OMT[id].previousStatus = newStatus
-
-                if (this.OMT[id].status === "connected") {
-                    console.log(`[OMT] Reconnected for ${id}`)
-                }
-            }
-        }, this.CONNECTION_POLL_INTERVAL_MS)
+        this.OMT[id] = { name, quality, sender: true, status: "unconnected" }
+        worker.postMessage({ type: "createOmt", id, name, quality })
     }
 
     static stopSenderOMT(id: string) {
-        if (!this.OMT[id]?.timer) return
-
-        console.info("OMT - stopping sender: " + this.OMT[id].name)
-        clearInterval(this.OMT[id].timer)
-
-        try {
-            this.OMT[id].sender?.destroy()
-        } catch (err) {
-            console.error("ERROR", err)
-        }
+        if (!this.OMT[id]) return
 
         delete this.OMT[id]
+        NdiSender.getSharedWorker()?.postMessage({ type: "destroyOmt", id })
     }
 
-    static async sendVideoBufferOMT(id: string, buffer: Buffer, { size = { width: 1280, height: 720 }, ratio = 16 / 9, framerate = 1, transparent = true }) {
-        const senderData = this.OMT[id]
-        if (!senderData?.sender) return
+    // main-path video (mixed outputs): BGRA buffer, transferred zero-copy to the worker when it owns its
+    // whole backing ArrayBuffer, copied otherwise (a transfer must never detach a shared/pooled buffer)
+    static sendVideoBufferOMT(id: string, buffer: Buffer, { size = { width: 1280, height: 720 }, ratio = 16 / 9, framerate = 1, transparent = true }: { size?: { width: number; height: number }; ratio?: number; framerate?: number; transparent?: boolean } = {}) {
+        const data = this.OMT[id]
+        const worker = this.getWorker()
+        if (!data?.sender || !worker) return
 
-        const omt = await loadOMT()
-        if (!omt) return
+        data.inFlight = (data.inFlight ?? 0) + 1
 
-        // Electron's toBitmap() gives BGRA on little-endian, which matches OMT's BGRA codec directly.
-        if (os.endianness() === "BE") util.ImageBufferAdjustment.ARGBtoBGRA(buffer)
-
-        // Without the Alpha flag OMT treats BGRA as opaque BGRX
-        const flags = transparent ? omt.VideoFlags.Alpha : omt.VideoFlags.None
-
-        try {
-            senderData.sender.send({
-                type: omt.FrameType.Video,
-                timestamp: this.getTimestamp(),
-                codec: omt.Codec.BGRA,
-                width: size.width,
-                height: size.height,
-                stride: size.width * 4,
-                flags,
-                frameRateN: Math.round(framerate * 1000),
-                frameRateD: 1000,
-                aspectRatio: ratio,
-                colorSpace: omt.ColorSpace.Undefined,
-                data: buffer
-            })
-        } catch (err) {
-            console.error("Error sending OMT video frame:", err)
+        let arrayBuffer: ArrayBuffer
+        if (buffer.byteOffset === 0 && buffer.byteLength === buffer.buffer.byteLength) {
+            arrayBuffer = buffer.buffer as ArrayBuffer
+        } else {
+            arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer
         }
+        worker.postMessage({ type: "videoOmt", id, buffer: arrayBuffer, byteOffset: 0, byteLength: arrayBuffer.byteLength, opts: { size, ratio, framerate, transparent } }, [arrayBuffer])
     }
 
-    // `buffer` is planar Float32 LE (the processAudio contract), which is OMT's FPA1 format directly
+    // `buffer` is planar Float32 LE (the processAudio contract) = OMT's FPA1 format directly.
+    // Clone (never transfer): audio buffers are small and possibly pooled.
     static async sendAudioBufferOMT(buffer: Buffer, { sampleRate, channelCount }: { sampleRate: number; channelCount: number }) {
-        const activeSender = Object.values(this.OMT).find((s) => s?.sender)
-        if (!activeSender || !buffer || buffer.length === 0) return
+        const hasSender = Object.values(this.OMT).some((s) => s?.sender)
+        const worker = hasSender ? this.getWorker() : null
+        if (!worker || !buffer || buffer.length === 0) return
 
-        const omt = await loadOMT()
-        if (!omt) return
-
-        const samplesPerChannel = Math.trunc(buffer.byteLength / channelCount / this.BYTES_PER_FLOAT32)
-        if (samplesPerChannel <= 0) return
-
-        const frame = {
-            type: omt.FrameType.Audio,
-            timestamp: this.getTimestamp(),
-            codec: omt.Codec.FPA1,
-            sampleRate,
-            channels: channelCount,
-            samplesPerChannel,
-            data: buffer
-        }
-
-        Object.values(this.OMT).forEach((data) => {
-            if (!data?.sender) return
-
-            try {
-                data.sender.send(frame)
-            } catch (err) {
-                console.error("Error sending OMT audio frame:", err)
-            }
-        })
+        worker.postMessage({ type: "audioOmt", buffer: buffer.buffer, byteOffset: buffer.byteOffset, byteLength: buffer.byteLength, opts: { sampleRate, channelCount } })
     }
 }
