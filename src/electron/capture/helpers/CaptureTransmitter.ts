@@ -4,6 +4,7 @@ import { OUTPUT_STREAM } from "../../../types/Channels"
 import { BlackmagicSender } from "../../blackmagic/BlackmagicSender"
 import { NdiSender } from "../../ndi/NdiSender"
 import util from "../../ndi/vingester-util"
+import { OmtSender } from "../../omt/OmtSender"
 import { OutputHelper } from "../../output/OutputHelper"
 import { getConnections, getStageStreamSubscriberIds, toServer, toStageStreamSubscribers } from "../../servers"
 import { RtmpStreamer } from "../../streaming/RtmpStreamer"
@@ -52,7 +53,7 @@ export class CaptureTransmitter {
         const captureOptions = OutputHelper.getOutput(captureId)?.captureOptions
         if (!captureOptions) return
 
-        const channelKeys = ["ndi", "blackmagic", "server", "stage", "webrtc", "rtmp"]
+        const channelKeys = ["ndi", "omt", "blackmagic", "server", "stage", "webrtc", "rtmp"]
         channelKeys.forEach((key) => {
             if (captureOptions.options[key]) this.startChannel(captureId, key)
         })
@@ -109,18 +110,18 @@ export class CaptureTransmitter {
         return 0
     }
 
-    // Off-main eligibility for a mixed output: an output with an NDI sender can run its WHOLE frame pipeline
-    // off the main thread IFF its only non-NDI consumers are server/stage. The worker reads back UYVY/UYVA for
-    // NDI AND a GPU-downscaled small BGRA (for server/stage) in one pass. Returns the heavy consumer keys
-    // (empty for an NDI-only output), or null when a consumer that needs the full-res main path
+    // Off-main eligibility for a mixed output: an output with an NDI/OMT sender can run its WHOLE frame
+    // pipeline off the main thread IFF its only other consumers are server/stage. The worker reads back the
+    // frame AND a GPU-downscaled small BGRA (for server/stage) in one pass. Returns the heavy consumer keys
+    // (empty for an NDI/OMT-only output), or null when a consumer that needs the full-res main path
     // (webrtc/rtmp/blackmagic) is present, so the caller keeps the main path.
     static getHeavyOffMainConsumers(captureId: string): string[] | null {
-        const nonNdi = Object.keys(this.channels)
+        const heavy = Object.keys(this.channels)
             .filter((k) => k.startsWith(`${captureId}-`))
             .map((k) => this.channels[k].key)
-            .filter((key) => key !== "ndi")
-        if (nonNdi.some((key) => key !== "server" && key !== "stage")) return null
-        return nonNdi
+            .filter((key) => key !== "ndi" && key !== "omt")
+        if (heavy.some((key) => key !== "server" && key !== "stage")) return null
+        return heavy
     }
 
     // The GPU downscale target for the off-main scaled buffer (server/stage): cap width so only a few MB cross
@@ -139,12 +140,12 @@ export class CaptureTransmitter {
     static groupOffMainInfo(memberIds: string[]): { eligible: boolean; needsScaled: boolean } {
         let needsScaled = false
         for (const id of memberIds) {
-            const nonNdi = Object.keys(this.channels)
+            const heavy = Object.keys(this.channels)
                 .filter((k) => k.startsWith(`${id}-`))
                 .map((k) => this.channels[k].key)
-                .filter((key) => key !== "ndi")
-            if (nonNdi.some((key) => key !== "server" && key !== "stage")) return { eligible: false, needsScaled: false }
-            if (nonNdi.length) needsScaled = true
+                .filter((key) => key !== "ndi" && key !== "omt")
+            if (heavy.some((key) => key !== "server" && key !== "stage")) return { eligible: false, needsScaled: false }
+            if (heavy.length) needsScaled = true
         }
         return { eligible: true, needsScaled }
     }
@@ -279,7 +280,7 @@ export class CaptureTransmitter {
 
     // buffer-consumers need only raw BGRA bytes (no NativeImage resize/toJPEG), so on the shared-texture
     // path they can take the readback buffer directly instead of a createFromBitmap -> toBitmap round-trip.
-    private static readonly BUFFER_CONSUMERS = new Set(["ndi", "webrtc", "rtmp", "blackmagic"])
+    private static readonly BUFFER_CONSUMERS = new Set(["ndi", "omt", "webrtc", "rtmp", "blackmagic"])
 
     private static osrModule: any = null
     private static loadOsr(): any {
@@ -387,6 +388,9 @@ export class CaptureTransmitter {
             case "ndi":
                 this.sendRawToNdi(captureId, buffer, size, format)
                 break
+            case "omt":
+                this.sendRawToOmt(captureId, buffer, size)
+                break
             case "webrtc":
                 this.sendRawToWebRtc(captureId, buffer, size, format)
                 break
@@ -431,6 +435,18 @@ export class CaptureTransmitter {
         NdiSender.sendVideoBufferNDI(captureId, Buffer.from(buffer), { size, ratio, framerate, transparent, format })
     }
 
+    // OMT takes BGRA directly (format is always 0 for an omt consumer — getReadbackFormat never routes
+    // UYVY/RGBA to it). Owned copy: the shared readback buffer is recycled and reread by other consumers.
+    private static sendRawToOmt(captureId: string, buffer: Buffer, size: Size) {
+        if (!OmtSender.OMT[captureId]?.sender) return
+        if (this.shouldSkipUnchangedNonBlackmagicFrame("omt", captureId, buffer, size)) return
+        const output = OutputHelper.getOutput(captureId)
+        const ratio = size.height ? size.width / size.height : 16 / 9
+        const transparent = output?.transparent !== false
+        const framerate = output?.captureOptions?.framerates?.omt || 30
+        OmtSender.sendVideoBufferOMT(captureId, Buffer.from(buffer), { size, ratio, framerate, transparent })
+    }
+
 
     private static sendRawToWebRtc(captureId: string, buffer: Buffer, size: Size, format = 0) {
         if (!WebRtcHost.isRunning()) return
@@ -462,6 +478,9 @@ export class CaptureTransmitter {
         switch (key) {
             case "ndi":
                 this.sendBufferToNdi(captureId, image, { size })
+                break
+            case "omt":
+                this.sendBufferToOmt(captureId, image, { size })
                 break
             case "blackmagic":
                 this.sendBufferToBlackmagic(captureId, image)
@@ -506,6 +525,23 @@ export class CaptureTransmitter {
         const framerate = output?.captureOptions?.framerates?.ndi || 30
 
         NdiSender.sendVideoBufferNDI(captureId, buffer, { size, ratio, framerate, transparent })
+    }
+
+    // OMT
+    static sendBufferToOmt(captureId: string, image: NativeImage, { size }: { size: { width: number; height: number } }) {
+        if (!OmtSender.OMT[captureId]?.sender) return
+        // skip the toBitmap readback for frames the busy worker would drop anyway
+        if (OmtSender.isBusyOMT(captureId)) return
+
+        const buffer = image.toBitmap()
+        if (this.shouldSkipUnchangedNonBlackmagicFrame("omt", captureId, buffer, size)) return
+
+        const output = OutputHelper.getOutput(captureId)
+        const ratio = image.getAspectRatio()
+        const transparent = output?.transparent !== false
+        const framerate = output?.captureOptions?.framerates?.omt || 30
+
+        OmtSender.sendVideoBufferOMT(captureId, buffer, { size, ratio, framerate, transparent })
     }
 
     private static convertToRGBA(buffer: Buffer): void {

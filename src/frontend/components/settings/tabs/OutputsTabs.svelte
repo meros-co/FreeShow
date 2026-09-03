@@ -68,7 +68,7 @@
                 AudioAnalyser.recorderActivate()
             }
 
-            const captureTypeKeys = ["blackmagic", "ndi", "webrtc", "rtmp"]
+            const captureTypeKeys = ["blackmagic", "ndi", "omt", "webrtc", "rtmp"]
             if (out.enabled && (captureTypeKeys.includes(key) || key === "transparent" || key === "invisible")) {
                 if (value && captureTypeKeys.includes(key)) newToast("toast.output_capture_enabled")
                 // these keys change window-creation options / the window's fixed offscreen (OSR) mode,
@@ -133,11 +133,12 @@
         if (!skipPopup) {
             if (localType !== "window") {
                 updateOutput("invisible", true, outputId)
-                if (!localType && networkType === "ndi") updateOutput("transparent", true, outputId)
+                if (!localType && (networkType === "ndi" || networkType === "omt")) updateOutput("transparent", true, outputId)
             }
 
             if (localType === "blackmagic") updateOutput("blackmagic", true, outputId)
             if (networkType === "ndi") updateOutput("ndi", true, outputId)
+            else if (networkType === "omt") updateOutput("omt", true, outputId)
             else if (networkType === "webrtc") updateOutput("webrtc", true, outputId)
             else if (networkType === "rtmp") updateOutput("rtmp", true, outputId)
 
