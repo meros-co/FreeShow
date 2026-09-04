@@ -1,4 +1,5 @@
 import { parentPort } from "worker_threads"
+import { loadOMT } from "../omt/omtModule"
 
 // NDI engine in a worker_thread: colour-convert, padding and grandiose send-dispatch all run off the
 // main thread. NdiSender on the main thread is a thin proxy that forwards messages here.
@@ -80,30 +81,6 @@ const NDI: { [id: string]: Sender } = {}
 // queue and audio machinery are shared via the Sender protocol adapters above
 const OMTS: { [id: string]: Sender } = {}
 
-// dynamic import for the "openmediatransport" ES module (same pattern as grandiose)
-let omtModule: any | null = null
-let omtPromise: Promise<any | null> | null = null
-let omtWarned = false
-const loadOMT = async () => {
-    if (omtModule) return omtModule
-    if (omtPromise) return omtPromise
-
-    omtPromise = import("openmediatransport")
-        .then((imported) => {
-            omtModule = imported
-            return imported
-        })
-        .catch((err: any) => {
-            if (!omtWarned) console.warn("OMT not available:", err?.message || err)
-            omtWarned = true
-            return null
-        })
-        .finally(() => {
-            omtPromise = null
-        })
-
-    return omtPromise
-}
 
 // FS_CAP_STATS: once/sec per sender — sentReal (wire-unique fps), sentRepeat (static re-sends),
 // coalescedReal (real frames lost at the send stage), pacer counters, wireGap (send evenness),

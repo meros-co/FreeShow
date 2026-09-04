@@ -1,21 +1,8 @@
 import { toApp } from ".."
 import { OMT } from "../../types/Channels"
 import util from "../ndi/vingester-util"
+import { loadOMT } from "./omtModule"
 import { OutputHelper } from "../output/OutputHelper"
-
-let warned = false
-let omtModule: any | null = null
-const loadOMT = async () => {
-    if (omtModule) return omtModule
-    try {
-        omtModule = await import("openmediatransport")
-        return omtModule
-    } catch (err: any) {
-        if (!warned) console.warn("OMT not available:", err?.message || err)
-        warned = true
-        return null
-    }
-}
 
 type Source = { name: string; urlAddress?: string; id: string }
 

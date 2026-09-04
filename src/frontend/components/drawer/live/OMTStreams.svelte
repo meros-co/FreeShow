@@ -18,15 +18,27 @@
     const receiveOMT = {
         RECEIVE_LIST: (msg) => {
             loading = false
-            if (!msg || sources.length) return
+            if (!msg) return
 
-            sources = JSON.parse(msg).map(({ name, urlAddress }) => ({ name, id: urlAddress }))
+            // sources come and go while this list is open, so always take the latest set
+            const list = JSON.parse(msg).map(({ name, urlAddress }) => ({ name, id: urlAddress }))
+            if (JSON.stringify(list) !== JSON.stringify(sources)) sources = list
         }
     }
 
+    // discovery is asynchronous: a source that starts after this opened must still appear
+    const REFRESH_INTERVAL_MS = 3000
+    let refreshInterval: NodeJS.Timeout | null = null
+
     receive(OMT, receiveOMT, "OMT_CAPTURE")
-    onMount(() => send(OMT, ["RECEIVE_LIST"], {}))
-    onDestroy(() => destroy(OMT, "OMT_CAPTURE"))
+    onMount(() => {
+        send(OMT, ["RECEIVE_LIST"], {})
+        refreshInterval = setInterval(() => send(OMT, ["RECEIVE_LIST"], {}), REFRESH_INTERVAL_MS)
+    })
+    onDestroy(() => {
+        if (refreshInterval) clearInterval(refreshInterval)
+        destroy(OMT, "OMT_CAPTURE")
+    })
 </script>
 
 {#if loading}
