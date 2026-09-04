@@ -55,34 +55,26 @@ type Sender = {
     sendingAudio?: boolean
     audioQueue?: any[]
     offMain?: boolean
-    pendingReal?: boolean // meta for pendingVideoFrame: true = fresh capture (real), false = repeat (main path only)
-    coalescedReal?: number // FS_CAP_STATS: REAL frames lost — pace-queue overflow (off-main) / pending-slot overwrite (main)
-    sendMsSum?: number // FS_CAP_STATS: total ms spent inside sender.video() this window
-    sentReal?: number // FS_CAP_STATS: completed sends of REAL frames this window (= true wire-unique fps)
-    sentRepeat?: number // FS_CAP_STATS: completed sends of repeated frames (fresh timecode, same pixels)
-    // send-side pacer (off-main path): FIFO of real frames + one drift-corrected pace timer at the
-    // configured frame interval. Each tick sends exactly one frame (oldest real, else a repeat with a
-    // fresh timecode) — the receiver plays at our send-call cadence, so evening the sends evens playback.
+    pendingReal?: boolean
+    coalescedReal?: number
+    sendMsSum?: number
+    sentReal?: number
+    sentRepeat?: number
     paceQueue?: { frame: any; pbuf: PacerBuf }[]
-    lastPace?: { frame: any; pbuf: PacerBuf } // newest real frame, pinned (refcounted) for repeats
+    lastPace?: { frame: any; pbuf: PacerBuf }
     paceTimer?: NodeJS.Timeout
-    paceNextDue?: number // absolute-timeline schedule (nextDue += interval) — drift-corrected, no setTimeout creep
-    paceInterval?: number // 1000/captureFramerate (configured intent, same source scheduleRepeat used)
-    paceCap?: number // queue capacity = renderer's derived depth_r + 1 (measured/derived, not tuned)
-    paceMisses?: number // FS_CAP_STATS: ticks with no queued real frame -> repeat sent
-    // a busy tick is simply skipped (the frame re-quantizes to the next tick); re-running skipped
-    // ticks on send completion worsens jitter
-    paceBusy?: number // FS_CAP_STATS: ticks skipped because the previous send was still in flight
-    lastRealSendAt?: number // wire-side evenness: Date.now() of the previous REAL send call
-    realGaps?: number[] // FS_CAP_STATS: gaps between consecutive REAL send calls this window (mean/p95 reported)
+    paceNextDue?: number
+    paceInterval?: number
+    paceCap?: number
+    paceMisses?: number
+    paceBusy?: number
+    lastRealSendAt?: number
+    realGaps?: number[]
 }
 const NDI: { [id: string]: Sender } = {}
 // OMT senders live in the same worker, so an NDI+OMT output shares one readback per frame
 const OMTS: { [id: string]: Sender } = {}
 
-// FS_CAP_STATS: once/sec per sender — sentReal (wire-unique fps), sentRepeat (static re-sends),
-// coalescedReal (real frames lost at the send stage), pacer counters, wireGap (send evenness),
-// rb (the addon's readback backend), cpuCores (process-wide CPU per window)
 if (process.env.FS_CAP_STATS) {
     let lastCpu = process.cpuUsage()
     let lastCpuAt = Date.now()
@@ -541,9 +533,7 @@ async function sendOmtAudioBuffer(buffer: Buffer, { sampleRate, channelCount }: 
 }
 // ---- end OMT ---------------------------------------------------------------------------------------------
 
-// free readback-slot pool per output: concurrent captures can finish out of order, so each needs a
-// distinct osr-capture key. Allocated on demand (main bounds concurrency with its in-flight depth);
-// stopSender releases every slot ever allocated.
+// Pool of readback slots per output
 const readbackSlots: { [id: string]: { free: number[]; next: number } } = {}
 function acquireReadbackSlot(id: string): number {
     const pool = (readbackSlots[id] ||= { free: [], next: 0 })
@@ -554,25 +544,14 @@ function releaseReadbackSlot(id: string, slot: number) {
     if (!pool.free.includes(slot)) pool.free.push(slot)
 }
 
-// ---- send-side pacer (even wire delivery) ----
-// The receiver plays frames at our send-call cadence, so clumped sends mean juddery playback no matter
-// how many unique frames get through. Per sender: a FIFO of real frames + one pace timer at the
-// configured frame interval; every tick sends exactly one frame — the oldest queued real if any, else a
-// repeat of the newest real with a fresh timecode. Clumps drain over multiple ticks; static content
-// holds the NDI keepalive rate.
-//
-// Ownership: the pooled readback buffer is memcpy'd once per capture into a pacer-owned recycled
-// Buffer; one refcounted copy is shared across all fan-out members. Holders (one ref each): every
-// queue entry, each member's lastPace pin, each in-flight send. The Buffer returns to the free list
-// only at refcount 0, so it can never be recycled while anything still reads it.
+// Send-side pacer: ensures frames are dispatched to NDI at steady intervals.
+// Holds queued frames in refcounted recycled buffers and sends repeats if no new frame arrives in time.
 type PacerBuf = { buf: Buffer; refs: number; owner: string }
 const pacerPools: { [rendererId: string]: Buffer[] } = {}
 function acquirePacerBuf(owner: string, length: number): PacerBuf {
     const pool = (pacerPools[owner] ||= [])
     const idx = pool.findIndex((b) => b.byteLength === length)
     if (idx >= 0) return { buf: pool.splice(idx, 1)[0], refs: 0, owner }
-    // no match -> the size regime changed (resolution/alpha toggle); pooled bufs are unreferenced by
-    // definition, so drop the stale ones instead of accumulating dead memory
     pool.length = 0
     return { buf: Buffer.allocUnsafe(length), refs: 0, owner }
 }
@@ -583,9 +562,6 @@ function releasePacerRef(pb: PacerBuf) {
     if (pool && !pool.includes(pb.buf)) pool.push(pb.buf)
 }
 
-// drift-corrected pace loop: ticks are scheduled against an ABSOLUTE timeline (nextDue += interval), so
-// setTimeout callback latency never accumulates into cadence drift. If the loop falls behind (event-loop
-// stall), it RESYNCS to now + interval — never burst-fires to catch up (each tick sends exactly one frame).
 function startPacer(reg: { [id: string]: Sender }, id: string) {
     const s = reg[id]
     if (!s || s.paceTimer) return
@@ -611,19 +587,15 @@ function paceTick(reg: { [id: string]: Sender }, id: string) {
     const s = reg[id]
     if (!s?.sender) return
     if (s.sendingVideo) {
-        // previous send still in flight — skip this tick; the frame re-quantizes to the next one
         s.paceBusy = (s.paceBusy || 0) + 1
         return
     }
     const entry = s.paceQueue?.shift()
     if (entry) {
-        // real frame: the queue's ref TRANSFERS to the send (released in paceSend's finally)
         void paceSend(reg, id, entry, true)
         return
     }
     if (s.lastPace) {
-        // no fresh content this tick — repeat the newest real frame to hold the wire cadence.
-        // take a send-ref so the buffer stays valid even if lastPace is replaced mid-send.
         s.paceMisses = (s.paceMisses || 0) + 1
         s.lastPace.pbuf.refs++
         void paceSend(reg, id, s.lastPace, false)
@@ -638,12 +610,10 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
     }
     senderData.sendingVideo = true
     if (real) {
-        // wire-side evenness telemetry: gap between consecutive REAL send calls (acceptance ≈ 1× tick interval)
         const now = Date.now()
         if (process.env.FS_CAP_STATS && senderData.lastRealSendAt) (senderData.realGaps ||= []).push(now - senderData.lastRealSendAt)
         senderData.lastRealSendAt = now
     }
-    // fresh timestamp at SEND time for real and repeat alike — the wire cadence is the pacer's, not the capture's
     const frame = { ...entry.frame, [senderData.tsKey || "timecode"]: (timeStart + process.hrtime.bigint()) / TIMECODE_DIVISOR }
     const sendT0 = process.env.FS_CAP_STATS ? Date.now() : 0
     try {
@@ -660,11 +630,7 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
         releasePacerRef(entry.pbuf)
     }
 }
-// ---- end pacer -------------------------------------------------------------------------------------------
 
-// off-main capture-and-send: the worker reads back the shared texture AND sends, so the main process
-// never touches frame data — it only forwards the texture handle (Windows/mac shared handle, Linux
-// { planes, modifier }). The addon converts to UYVY/UYVA on the GPU during readback.
 async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number }) {
     // seq identifies this in-flight capture; the osr-capture key is slotted so concurrent readbacks
     // for one output use independent pool entries
@@ -682,37 +648,25 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
     }
     const { size, ratio, framerate, format, dstW = 0, dstH = 0 } = opts
     // FS_CAP_STATS: per-frame hop timestamps posted back with captureDone (worker_threads share the
-    // process clock, so main can difference them against its forward time)
     const tl = process.env.FS_CAP_STATS ? { recv: Date.now(), cS: 0, cE: 0, fS: 0, fE: 0, enq: 0 } : null
-    // shared-render: one readback fans out to every group member's sender ([id] when sharing is off)
     const members = opts.members?.length ? opts.members : [id]
-    // GPU downscale (server/stage) only works via the Windows two-phase readback; ignore it otherwise
     const wantScaled = dstW > 0 && dstH > 0
-    // captures can complete out of order, so a seq%N key is unsafe — the free-slot pool guarantees
-    // concurrent captures always use distinct keys
     const slot = acquireReadbackSlot(id)
     const rbKey = `${id}#${slot}`
     if (senderData) senderData.offMain = true
     if (omtData) omtData.offMain = true
-    // prefer the two-phase path: its consume callback releases the Electron texture synchronously at
-    // the GPU-done boundary, so the compositor frame pool never starves
     const twoPhase = typeof osr.readbackConsume === "function" && typeof osr.readbackFinish === "function"
     const singleDispatch = !twoPhase && typeof osr.readbackOnce === "function"
     let textureReleased = false
-    // Tell main it can RELEASE the Electron shared texture (frees the compositor frame pool). In two-phase
-    // this happens right after the GPU consume; otherwise after the whole readback.
     const releaseTexture = () => {
         if (textureReleased) return
         textureReleased = true
         port.postMessage({ type: "releaseTexture", id, seq })
     }
     try {
-        // NDI frame data (UYVY/UYVA); a mixed output also gets a GPU-downscaled small BGRA (`scaled`)
-        // for server/stage in the same pass
         let buffer: Buffer
         let scaled: Buffer | undefined
         if (singleDispatch) {
-            // one dispatch: releaseTexture fires from the addon's onRelease callback at the GPU-done boundary
             if (tl) tl.cS = Date.now()
             const onRelease = () => {
                 if (tl && !tl.cE) tl.cE = tl.fS = Date.now()
@@ -721,9 +675,9 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             const res = await osr.readbackOnce(source, size.width, size.height, format, rbKey, wantScaled ? dstW : 0, wantScaled ? dstH : 0, onRelease)
             if (tl) {
                 tl.fE = Date.now()
-                if (!tl.cE) tl.cE = tl.fS = tl.fE // release never fired (early error) — collapse the split
+                if (!tl.cE) tl.cE = tl.fS = tl.fE
             }
-            releaseTexture() // safety: no-op if onRelease already released
+            releaseTexture()
             if (wantScaled && res && res.main) {
                 buffer = res.main
                 scaled = res.scaled
@@ -731,13 +685,10 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
                 buffer = res
             }
         } else if (twoPhase) {
-            // phase 1: GPU-convert (+ GPU-downscale when wantScaled) + wait for the GPU to finish reading the
-            // shared texture -> release it early
             if (tl) tl.cS = Date.now()
             await osr.readbackConsume(source, size.width, size.height, format, rbKey, wantScaled ? dstW : 0, wantScaled ? dstH : 0)
             if (tl) tl.cE = Date.now()
             releaseTexture()
-            // phase 2: the slow PCIe copy-out (texture already released, so the compositor isn't stalled)
             if (tl) tl.fS = Date.now()
             const res = await osr.readbackFinish(rbKey, size.width, size.height, format, wantScaled ? dstW : 0, wantScaled ? dstH : 0)
             if (tl) tl.fE = Date.now()
@@ -748,26 +699,18 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
                 buffer = res
             }
         } else {
-            // single-phase (mac/linux): no GPU downscale -> NDI only (mixed stays on the main path there)
             if (tl) tl.cS = Date.now()
             buffer = await osr.readback(source, size.width, size.height, format, rbKey)
-            if (tl) tl.cE = tl.fS = tl.fE = Date.now() // one phase: consume spans it all, finish is empty
+            if (tl) tl.cE = tl.fS = tl.fE = Date.now()
             releaseTexture()
         }
 
-        // ship the GPU-downscaled server/stage buffer to main (COPY via structured clone, NOT transfer — it is
-        // a reused pooled buffer, so detaching it would corrupt the pool). Do this before captureDone frees the slot.
         if (scaled && scaled.length) {
             port.postMessage({ type: "scaledFrame", id, members, buffer: scaled.buffer, byteOffset: scaled.byteOffset, byteLength: scaled.byteLength, size: { width: dstW, height: dstH } })
         }
 
-        // pacer hand-off: copy the pooled readback buffer once into a pacer-owned recycled Buffer and
-        // enqueue that — the addon slot is free to recycle at captureDone (below) without any frame the
-        // pacer still holds ever tearing. ONE refcounted copy is shared across all fan-out members.
         const activeMembers = hasNdi ? members.filter((m) => NDI[m]?.sender) : []
         if (activeMembers.length) {
-            // a BGRA readback (the legacy capturePage path) still has to become NDI's UYVY/UYVA — one
-            // convert per frame, off the main thread
             let ndiBuffer = buffer
             let ndiFormat = format
             if (format === 0) {
@@ -778,7 +721,6 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             const fourCC: number = ndiFormat === 2 ? grandiose.FOURCC_UYVA : grandiose.FOURCC_UYVY
             const pbuf = acquirePacerBuf(id, ndiBuffer.length)
             ndiBuffer.copy(pbuf.buf, 0, 0, ndiBuffer.length)
-            // frame template — timecode is re-stamped at each send (the pacer owns the wire cadence)
             const frame = {
                 timecode: (timeStart + process.hrtime.bigint()) / TIMECODE_DIVISOR,
                 xres: size.width,
@@ -795,23 +737,14 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
                 const md = NDI[m]!
                 md.offMain = true
                 md.tsKey ||= "timecode"
-                // per-member pace rate: each member's sender paces at its own resolved framerate
-                // (configured when connected, idle floor when not) — never the renderer's, whose idle
-                // floor would throttle a connected follower
                 const mfr = Math.max(1, opts.memberFramerates?.[m] || framerate)
                 md.paceInterval = 1000 / mfr
-                // rate rose while the pacer runs (e.g. idle floor -> receiver connected): re-phase the tick
-                // to the new interval now instead of letting the old (long) due play out one last time
                 if (md.paceTimer && md.paceNextDue && md.paceNextDue > Date.now() + md.paceInterval) {
                     clearTimeout(md.paceTimer)
                     md.paceTimer = undefined
                     startPacer(NDI, m)
                 }
                 const mFrame = mfr === framerate ? frame : { ...frame, frameRateN: mfr * 1000 }
-                // queue capacity = the renderer's DERIVED depth_r (passed from main) + 1 [UNIVERSAL headroom].
-                // Arrival clumps are ≤ depth by admission construction, so overflow means arrivals exceeded
-                // the cadence — drop the OLDEST (keep freshest, bound latency) and count it as coalescedReal
-                // (unique frames lost at the send stage; conservation sentReal+coalescedReal ≈ done holds).
                 md.paceCap = Math.max(2, (opts.depth ?? 1) + 1)
                 const queue = (md.paceQueue ||= [])
                 while (queue.length >= md.paceCap) {

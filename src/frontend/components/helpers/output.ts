@@ -62,8 +62,6 @@ export function setOutput(type: string, data: any, toggle = false, outputId = ""
     // stop any active break slide recording when the slide changes
     if (type === "slide") _stopBreakRecording()
 
-    customActionActivation("output_changed")
-
     const bindings = data?.bindings || (data?.layout ? ref[data.index]?.data?.bindings || [] : [])
     const allOutputIds = bindings.length ? bindings : getActiveOutputs(get(outputs), true, false, true)
     const outs = outputId ? [outputId] : allOutputIds
@@ -90,10 +88,12 @@ export function setOutput(type: string, data: any, toggle = false, outputId = ""
 
         if (data.type === "pdf") {
             const out = get(outputs)[outs[0]]?.out?.slide
-            if (out?.type !== "pdf") customActionActivation("pdf_start")
+            // timeout to activate after output has updated
+            if (out?.type !== "pdf") setTimeout(() => customActionActivation("pdf_start"))
         } else {
             const groupId = slide.globalGroup
-            if (groupId) customActionActivation("group_start", groupId)
+            // timeout to activate after output has updated
+            if (groupId) setTimeout(() => customActionActivation("group_start", groupId))
 
             // start recording time on break slides (no items, globalGroup === "break")
             const layoutSlideIndex = ref[data.index]?.type === "parent" ? (ref[data.index]?.index ?? -1) : -1
@@ -200,6 +200,8 @@ export function setOutput(type: string, data: any, toggle = false, outputId = ""
 
         return a
     })
+
+    customActionActivation("output_changed")
 }
 
 // setup video manager (and audio analyser)
@@ -1642,8 +1644,17 @@ export function getStyleTemplate(outSlide: OutSlide | null, currentStyle: Styles
     return template
 }
 
+function itemHasAutoSize(item: Item) {
+    return (item.textFit || "none") !== "none" || !!item.auto
+}
+
 export function slideHasAutoSizeItem(slide: Slide | Template) {
-    return slide?.items?.some((a) => (a.textFit || "none") !== "none" || a.auto)
+    return slide?.items?.some(itemHasAutoSize)
+}
+
+// the auto size text size has to be calculated if it is not stored yet
+export function itemNeedsAutoSize(item: Item) {
+    return itemHasAutoSize(item) && !item.autoFontSize
 }
 
 export function setTemplateStyle(outSlide: OutSlide | null, currentStyle: Styles, items: Item[] | undefined, outputId: string, slideDynamicValues?: { [key: string]: any }) {
