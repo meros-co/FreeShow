@@ -18,12 +18,15 @@
     let frame: any
     export let background = false
     export let mirror = false
+    // the output showing this stream owns the receiver: without its id the frames would be routed to
+    // whichever output happens to come first in the store, and this output would never receive any
+    export let outputId = ""
 
     let canvas: any
 
     onMount(() => {
         if (background) {
-            if (!mirror) send(BLACKMAGIC, ["RECEIVE_STREAM"], { source: screen, outputId: Object.keys($outputs)[0] })
+            if (!mirror) send(BLACKMAGIC, ["RECEIVE_STREAM"], { source: screen, outputId: outputId || Object.keys($outputs)[0] })
         } else send(BLACKMAGIC, ["RECEIVE_FRAME"], { source: screen })
     })
 
@@ -48,11 +51,11 @@
             if (data.id !== screen.id || !data.frame.video) return
             loaded = true
 
-            let timeSinceSent = Date.now() - data.time
-            if (timeSinceSent > 100) return // skip frames if overloaded
-
             // WIP play audio? (data.audio.data ...)
 
+            // Take the newest frame rather than dropping by age. Svelte coalesces several arrivals in
+            // one tick into a single draw, so a burst still never renders a backlog, while an absolute
+            // age cut discarded every 4K frame: 16MB takes longer than that to deliver on its own.
             frame = data.frame.video
         }
     }
@@ -63,7 +66,7 @@
     receive(BLACKMAGIC, receiveBlackmagic, receiverId)
     onDestroy(() => {
         destroy(BLACKMAGIC, receiverId)
-        if (background && !mirror) send(BLACKMAGIC, ["STOP_RECEIVER"], { id: screen.id, outputId: Object.keys($outputs)[0] })
+        if (background && !mirror) send(BLACKMAGIC, ["STOP_RECEIVER"], { id: screen.id, outputId: outputId || Object.keys($outputs)[0] })
     })
 
     let loaded = false
