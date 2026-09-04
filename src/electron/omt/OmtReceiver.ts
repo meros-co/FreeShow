@@ -1,6 +1,5 @@
 import { toApp } from ".."
 import { OMT } from "../../types/Channels"
-import util from "../ndi/vingester-util"
 import { loadOMT } from "./omtModule"
 import { OutputHelper } from "../output/OutputHelper"
 
@@ -117,8 +116,9 @@ export class OmtReceiver {
         }
     }
 
-    // convert an OMT BGRA frame to an RGBA frame the renderer canvas can draw directly
-    private static toRGBAFrame(frame: any): { xres: number; yres: number; data: Buffer } {
+    // tightly pack an OMT frame (drop row padding). The channel order stays BGRA: swapping to RGBA is a
+    // per-pixel pass that would run on the main thread, so the renderer does it while drawing instead.
+    private static packFrame(frame: any): { xres: number; yres: number; data: Buffer; format: "bgra" } | null {
         const width: number = frame.width
         const height: number = frame.height
         const stride: number = frame.stride || width * 4
@@ -133,19 +133,49 @@ export class OmtReceiver {
             for (let y = 0; y < height; y++) source.copy(data, y * rowBytes, y * stride, y * stride + rowBytes)
         }
 
-        util.ImageBufferAdjustment.BGRAtoRGBA(data)
-        return { xres: width, yres: height, data }
+        if (data.length !== rowBytes * height) return null
+        return { xres: width, yres: height, data, format: "bgra" }
+    }
+
+    // nearest-neighbour shrink for the app window's preview: it draws this a few hundred pixels wide, and
+    // every byte sent costs main-thread time in IPC
+    private static PREVIEW_MAX_WIDTH = 480
+    private static PREVIEW_INTERVAL_MS = 100
+    private static lastPreviewSent: { [id: string]: number } = {}
+
+    private static previewFrame(full: { xres: number; yres: number; data: Buffer }) {
+        if (full.xres <= this.PREVIEW_MAX_WIDTH) return { ...full, format: "bgra" as const }
+
+        const scale = Math.ceil(full.xres / this.PREVIEW_MAX_WIDTH)
+        const width = Math.floor(full.xres / scale)
+        const height = Math.floor(full.yres / scale)
+        const data = Buffer.alloc(width * height * 4)
+        for (let y = 0; y < height; y++) {
+            let target = y * width * 4
+            let sourceRow = y * scale * full.xres * 4
+            for (let x = 0; x < width; x++) {
+                full.data.copy(data, target, sourceRow + x * scale * 4, sourceRow + x * scale * 4 + 4)
+                target += 4
+            }
+        }
+        return { xres: width, yres: height, data, format: "bgra" as const }
     }
 
     static sendBuffer(id: string, frame: any) {
         if (!frame?.data) return
 
-        const converted = this.toRGBAFrame(frame)
-        if (converted.data.length !== converted.xres * converted.yres * 4) return
+        const packed = this.packFrame(frame)
+        if (!packed) return
 
-        const msg = { channel: "RECEIVE_STREAM", data: { id, frame: converted, time: Date.now() } }
-        toApp(OMT, msg)
-        this.sendToOutputs.forEach((outputId) => OutputHelper.Send.sendToWindow(outputId, msg, OMT))
+        // outputs render the stream itself and need every pixel
+        const time = Date.now()
+        this.sendToOutputs.forEach((outputId) => OutputHelper.Send.sendToWindow(outputId, { channel: "RECEIVE_STREAM", data: { id, frame: packed, time } }, OMT))
+
+        // the app window only ever previews it (drawer card, output mirror), so send a small copy at a
+        // relaxed rate — full frames here saturated the main thread and stalled the whole UI
+        if (time - (this.lastPreviewSent[id] || 0) < this.PREVIEW_INTERVAL_MS) return
+        this.lastPreviewSent[id] = time
+        toApp(OMT, { channel: "RECEIVE_STREAM", data: { id, frame: this.previewFrame(packed), time } })
     }
 
     private static destroyReceiver(sourceId: string) {
@@ -173,6 +203,7 @@ export class OmtReceiver {
                 setTimeout(() => {
                     this.destroyReceiver(data.id)
                     delete this.OMT_RECEIVERS[data.id]
+                    delete this.lastPreviewSent[data.id]
                 }, 100)
             }
             return
@@ -184,6 +215,7 @@ export class OmtReceiver {
         setTimeout(() => {
             Object.keys(this.allActiveReceivers).forEach((id) => this.destroyReceiver(id))
             this.OMT_RECEIVERS = {}
+            this.lastPreviewSent = {}
         }, 100)
     }
 }

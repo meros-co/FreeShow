@@ -35,7 +35,18 @@
         canvas.width = WIDTH
         canvas.height = HEIGHT
 
-        const imageData = new ImageData(new Uint8ClampedArray(frame.data), WIDTH, HEIGHT)
+        const pixels = new Uint8ClampedArray(frame.data)
+        // frames arrive as BGRA: swapping channels in the main process would cost it a pass over every
+        // pixel of every frame, so the swap happens here instead
+        if (frame.format === "bgra") {
+            const words = new Uint32Array(pixels.buffer)
+            for (let i = 0; i < words.length; i++) {
+                const p = words[i]
+                words[i] = (p & 0xff00ff00) | ((p & 0x00ff0000) >>> 16) | ((p & 0x000000ff) << 16)
+            }
+        }
+
+        const imageData = new ImageData(pixels, WIDTH, HEIGHT)
         ctx?.putImageData(imageData, 0, 0)
     }
 
