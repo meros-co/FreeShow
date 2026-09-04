@@ -6,11 +6,25 @@ import { OutputHelper } from "../output/OutputHelper"
 
 type Source = { name: string; urlAddress?: string; id: string }
 
+// One loop per source. The loop is the only thing that ever calls receive() or destroy() on its
+// instance, and it destroys the instance itself after its final receive() has settled: the addon runs
+// receive() on the libuv threadpool holding the raw libomt pointer, so a destroy from anywhere else
+// while one is in flight is a use-after-free in libomt (an access violation, or a Napi::Error thrown
+// from the completion on the main thread, which is fatal). Stopping or replacing a record ends its loop
+// at the next check, and callers that need the instance gone await the loop rather than a timer.
+type Loop = {
+    source: Source
+    lowbandwidth: boolean
+    stopped: boolean
+    receiver: any
+    done: Promise<void>
+    wake: (() => void) | null
+}
+
 export class OmtReceiver {
     static omtDisabled = false
-    static OMT_RECEIVERS: { [key: string]: { shouldStop?: boolean; source?: Source; lowbandwidth?: boolean } } = {}
-    static allActiveReceivers: { [key: string]: any } = {}
     static sendToOutputs: string[] = []
+    private static loops: { [sourceId: string]: Loop } = {}
     private static codecs: any = null
 
     private static readonly RECEIVE_TIMEOUT_MS = 50
@@ -57,13 +71,9 @@ export class OmtReceiver {
     // Thumbnail reception for drawer cards (low bandwidth preview)
     static async receiveStreamFrameOMT({ source }: { source: Source }) {
         if (this.omtDisabled) return
-        if (this.OMT_RECEIVERS[source.id]) return
+        if (this.loops[source.id]) return
 
-        this.OMT_RECEIVERS[source.id] = { shouldStop: false, source, lowbandwidth: true }
-        this.frameLoop(source.id, this.THUMBNAIL_LOOP_DELAY_MS).catch((err) => {
-            console.error(`OMT thumbnail error for ${source.id}:`, err)
-            this.stopReceiversOMT({ id: source.id })
-        })
+        this.startLoop(source, true, this.THUMBNAIL_LOOP_DELAY_MS)
     }
 
     // Full reception for output/background
@@ -71,56 +81,98 @@ export class OmtReceiver {
         if (this.omtDisabled) return
         if (!this.sendToOutputs.includes(outputId)) this.sendToOutputs.push(outputId)
 
-        // if a thumbnail loop is running, upgrade it to full capture
-        if (this.OMT_RECEIVERS[source.id]) {
-            this.OMT_RECEIVERS[source.id].shouldStop = true
-            await new Promise((resolve) => setTimeout(resolve, 100))
+        // a thumbnail loop holds a low-bandwidth instance: end it, and wait until it has released
+        // that instance, before starting the full-quality one
+        const existing = this.loops[source.id]
+        if (existing) {
+            if (!existing.lowbandwidth) return
+            await this.stopLoop(existing)
         }
-        // drop the low-bandwidth preview receiver so we recreate at full quality
-        this.destroyReceiver(source.id)
 
-        this.OMT_RECEIVERS[source.id] = { shouldStop: false, source, lowbandwidth: false }
-        this.frameLoop(source.id, this.FULL_LOOP_DELAY_MS).catch((err) => {
+        this.startLoop(source, false, this.FULL_LOOP_DELAY_MS)
+    }
+
+    private static startLoop(source: Source, lowbandwidth: boolean, delayMs: number) {
+        const loop: Loop = { source, lowbandwidth, stopped: false, receiver: null, done: Promise.resolve(), wake: null }
+        this.loops[source.id] = loop
+        loop.done = this.frameLoop(source.id, loop, delayMs).catch((err) => {
             console.error(`OMT reception error for ${source.id}:`, err)
-            this.stopReceiversOMT({ id: source.id })
         })
     }
 
-    private static async frameLoop(sourceId: string, delayMs: number) {
+    // ends the loop and resolves once it has destroyed its instance
+    private static stopLoop(loop: Loop) {
+        loop.stopped = true
+        loop.wake?.()
+        return loop.done
+    }
+
+    // a sleep that ends early when the loop is stopped, so a stop never waits out a thumbnail interval
+    private static pause(loop: Loop, ms: number) {
+        return new Promise<void>((resolve) => {
+            const timer = setTimeout(finish, ms)
+            function finish() {
+                clearTimeout(timer)
+                loop.wake = null
+                resolve()
+            }
+            loop.wake = finish
+        })
+    }
+
+    private static async frameLoop(sourceId: string, loop: Loop, delayMs: number) {
         let consecutiveErrors = 0
 
-        while (this.OMT_RECEIVERS[sourceId] && !this.OMT_RECEIVERS[sourceId].shouldStop) {
-            try {
-                let receiver = this.allActiveReceivers[sourceId]
-                if (!receiver) {
-                    const receiverData = this.OMT_RECEIVERS[sourceId]
-                    const address = this.getAddress(receiverData.source!)
-                    receiver = this.allActiveReceivers[sourceId] = await this.createReceiver(address, receiverData.lowbandwidth)
-                    if (!receiver) throw new Error("Could not create receiver")
+        try {
+            // a replaced record belongs to a newer loop for the same source: this one is finished
+            while (!loop.stopped && this.loops[sourceId] === loop) {
+                try {
+                    if (!loop.receiver) {
+                        loop.receiver = await this.createReceiver(this.getAddress(loop.source), loop.lowbandwidth)
+                        if (!loop.receiver) throw new Error("Could not create receiver")
+                        if (loop.stopped) break
+                    }
+
+                    const frame = await loop.receiver.receive(this.RECEIVE_TIMEOUT_MS, 2 /* Video */)
+                    if (loop.stopped) break
+                    if (frame?.data) {
+                        this.sendBuffer(sourceId, frame)
+                        consecutiveErrors = 0
+                    }
+
+                    // receive() already blocks until the next frame, so pace on the source rather than a timer.
+                    // Idle (no frame) still backs off, and thumbnails keep their slow rate.
+                    if (frame?.data && delayMs < this.THUMBNAIL_LOOP_DELAY_MS) await new Promise((resolve) => setImmediate(resolve))
+                    else await this.pause(loop, delayMs)
+                } catch (err: any) {
+                    consecutiveErrors++
+                    // the failed receive() has settled, so this loop's instance can be dropped and recreated
+                    this.destroyInstance(loop)
+
+                    if (consecutiveErrors >= 10) {
+                        console.error(`OMT source ${sourceId}: too many errors, stopping`)
+                        loop.stopped = true
+                        break
+                    }
+
+                    await this.pause(loop, Math.min(5 * Math.pow(1.5, consecutiveErrors), 100))
                 }
-
-                const frame = await receiver.receive(this.RECEIVE_TIMEOUT_MS, 2 /* Video */)
-                if (frame?.data) {
-                    this.sendBuffer(sourceId, frame)
-                    consecutiveErrors = 0
-                }
-
-                // receive() already blocks until the next frame, so pace on the source rather than a timer.
-                // Idle (no frame) still backs off, and thumbnails keep their slow rate.
-                if (frame?.data && delayMs < this.THUMBNAIL_LOOP_DELAY_MS) await new Promise((resolve) => setImmediate(resolve))
-                else await new Promise((resolve) => setTimeout(resolve, delayMs))
-            } catch (err: any) {
-                consecutiveErrors++
-                this.destroyReceiver(sourceId)
-
-                if (consecutiveErrors >= 10) {
-                    console.error(`OMT source ${sourceId}: too many errors, stopping`)
-                    this.stopReceiversOMT({ id: sourceId })
-                    return
-                }
-
-                await new Promise((resolve) => setTimeout(resolve, Math.min(5 * Math.pow(1.5, consecutiveErrors), 100)))
             }
+        } finally {
+            // every receive() this loop issued has settled by now, so nothing can still be using it
+            this.destroyInstance(loop)
+            if (this.loops[sourceId] === loop) delete this.loops[sourceId]
+        }
+    }
+
+    private static destroyInstance(loop: Loop) {
+        const receiver = loop.receiver
+        loop.receiver = null
+        if (!receiver) return
+        try {
+            receiver.destroy()
+        } catch (err) {
+            console.error("Error destroying OMT receiver:", err)
         }
     }
 
@@ -142,18 +194,7 @@ export class OmtReceiver {
         toApp(OMT, { channel: "RECEIVE_STREAM", data: { id, frame: previewStreamFrame(packed, this.PREVIEW_MAX_WIDTH), time } })
     }
 
-    private static destroyReceiver(sourceId: string) {
-        const receiver = this.allActiveReceivers[sourceId]
-        if (!receiver) return
-        try {
-            receiver.destroy()
-        } catch (err) {
-            console.error("Error destroying OMT receiver:", err)
-        }
-        delete this.allActiveReceivers[sourceId]
-    }
-
-    static stopReceiversOMT(data: { id: string; outputId?: string } | null = null) {
+    static stopReceiversOMT(data: { id: string; outputId?: string } | null = null): Promise<void> {
         if (data?.id) {
             if (data.outputId) {
                 const index = this.sendToOutputs.indexOf(data.outputId)
@@ -162,22 +203,11 @@ export class OmtReceiver {
                 this.sendToOutputs = []
             }
 
-            if (!this.sendToOutputs.length && this.OMT_RECEIVERS[data.id]) {
-                this.OMT_RECEIVERS[data.id].shouldStop = true
-                setTimeout(() => {
-                    this.destroyReceiver(data.id)
-                    delete this.OMT_RECEIVERS[data.id]
-                }, 100)
-            }
-            return
+            const loop = this.loops[data.id]
+            if (!this.sendToOutputs.length && loop) return this.stopLoop(loop)
+            return Promise.resolve()
         }
 
-        Object.keys(this.OMT_RECEIVERS).forEach((id) => {
-            if (this.OMT_RECEIVERS[id]) this.OMT_RECEIVERS[id].shouldStop = true
-        })
-        setTimeout(() => {
-            Object.keys(this.allActiveReceivers).forEach((id) => this.destroyReceiver(id))
-            this.OMT_RECEIVERS = {}
-        }, 100)
+        return Promise.all(Object.values(this.loops).map((loop) => this.stopLoop(loop))).then(() => undefined)
     }
 }
