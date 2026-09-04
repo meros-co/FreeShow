@@ -1,6 +1,7 @@
 import { toApp } from ".."
 import { CaptureHelper } from "../capture/CaptureHelper"
 import { NdiSender } from "../ndi/NdiSender"
+import { ensureOmtCodecSearchPath } from "./omtModule"
 
 // Resources:
 // https://github.com/openmediatransport/libomtnet
@@ -68,6 +69,9 @@ export class OmtSender {
 
     static async createSenderOMT(id: string, name = "", quality?: number | string) {
         if (this.OMT[id]) this.stopSenderOMT(id)
+
+        // the worker cannot set this itself (its process.env is a copy), so do it here first
+        ensureOmtCodecSearchPath()
 
         const worker = this.getWorker()
         if (!worker) return

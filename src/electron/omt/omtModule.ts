@@ -1,13 +1,16 @@
 // Loads the "openmediatransport" ES module, shared by the main-process receiver and the send worker.
 
 import path from "path"
+import { isMainThread } from "worker_threads"
 
 // Windows resolves the OMT .NET layer's VMX codec DLL (libvmx) through the process search path, which
 // does not include the addon's own folder — without this every video encode/decode throws
 // DllNotFoundException, senders transmit nothing and receivers get no frames.
+// Main thread only: a worker's process.env is a private copy that never reaches the real process
+// environment the OS consults when loading a DLL, so the send worker relies on main setting this first.
 let searchPathReady = false
-function ensureCodecSearchPath() {
-    if (searchPathReady || process.platform !== "win32") return
+export function ensureOmtCodecSearchPath() {
+    if (searchPathReady || process.platform !== "win32" || !isMainThread) return
     searchPathReady = true
 
     try {
@@ -30,7 +33,7 @@ export function loadOMT(): Promise<any | null> {
     if (omtModule) return Promise.resolve(omtModule)
     if (omtPromise) return omtPromise
 
-    ensureCodecSearchPath()
+    ensureOmtCodecSearchPath()
 
     omtPromise = import("openmediatransport")
         .then((imported: any) => {
