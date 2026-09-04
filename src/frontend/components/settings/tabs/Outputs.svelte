@@ -140,11 +140,13 @@
     }
 
     // omt
+    // OMT's quality level is its bandwidth/latency control: lower quality compresses harder, so it
+    // costs less network and arrives sooner
     const omtQualities = [
-        { value: "Default", label: "Default" },
-        { value: "Low", label: "Low" },
-        { value: "Medium", label: "Medium" },
-        { value: "High", label: "High" }
+        { value: "Default", label: "settings.quality_default" },
+        { value: "Low", label: "settings.quality_low" },
+        { value: "Medium", label: "settings.quality_medium" },
+        { value: "High", label: "settings.quality_high" }
     ]
     function updateOmtData(e: any, key: string) {
         let id = currentOutput?.id
@@ -159,13 +161,8 @@
 
         updateOutput("omtData", newData)
 
+        // the sender picks up name/quality changes by recreating itself, so nothing needs restarting
         send(OMT, ["OMT_DATA"], { id, ...newData })
-
-        if (key === "name" || key === "quality") {
-            alertMessage.set("settings.restart_for_change")
-            activePopup.set("alert")
-            saved.set(false)
-        }
     }
 
     // webrtc

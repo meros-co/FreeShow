@@ -4,12 +4,15 @@ import { loadOMT } from "./omtModule"
 import { OutputHelper } from "../output/OutputHelper"
 
 type Source = { name: string; urlAddress?: string; id: string }
+type FrameFormat = "uyvy" | "bgra" | "rgba"
+type PackedFrame = { xres: number; yres: number; data: Buffer; format: FrameFormat }
 
 export class OmtReceiver {
     static omtDisabled = false
     static OMT_RECEIVERS: { [key: string]: { shouldStop?: boolean; source?: Source; lowbandwidth?: boolean } } = {}
     static allActiveReceivers: { [key: string]: any } = {}
     static sendToOutputs: string[] = []
+    private static codecs: any = null
 
     private static readonly RECEIVE_TIMEOUT_MS = 50
     private static readonly FULL_LOOP_DELAY_MS = 16 // ~60fps ceiling
@@ -24,8 +27,12 @@ export class OmtReceiver {
             const omt = await loadOMT()
             if (!omt) return null
 
+            this.codecs = omt.Codec
+
+            // UYVY is half the bytes of BGRA and every one of them costs main-thread time in IPC;
+            // the renderer converts it on the GPU. Sources with alpha still arrive as BGRA.
             const flags = lowbandwidth ? omt.ReceiveFlags.Preview : omt.ReceiveFlags.None
-            return new omt.Receiver(address, omt.FrameType.Video, omt.PreferredVideoFormat.BGRA, flags)
+            return new omt.Receiver(address, omt.FrameType.Video, omt.PreferredVideoFormat.UYVYorBGRA, flags)
         } catch (err) {
             console.error("Failed to create OMT receiver:", err)
             return null
@@ -116,13 +123,14 @@ export class OmtReceiver {
         }
     }
 
-    // tightly pack an OMT frame (drop row padding). The channel order stays BGRA: swapping to RGBA is a
-    // per-pixel pass that would run on the main thread, so the renderer does it while drawing instead.
-    private static packFrame(frame: any): { xres: number; yres: number; data: Buffer; format: "bgra" } | null {
+    // tightly pack an OMT frame (drop row padding), leaving the pixels in the format the library gave us:
+    // converting here would mean a per-pixel pass on the main thread for every frame.
+    private static packFrame(frame: any): PackedFrame | null {
         const width: number = frame.width
         const height: number = frame.height
-        const stride: number = frame.stride || width * 4
-        const rowBytes = width * 4
+        const format: FrameFormat = frame.codec === this.codecs?.UYVY ? "uyvy" : "bgra"
+        const rowBytes = format === "uyvy" ? width * 2 : width * 4
+        const stride: number = frame.stride || rowBytes
         const source: Buffer = frame.data
 
         let data: Buffer
@@ -134,7 +142,7 @@ export class OmtReceiver {
         }
 
         if (data.length !== rowBytes * height) return null
-        return { xres: width, yres: height, data, format: "bgra" }
+        return { xres: width, yres: height, data, format }
     }
 
     // nearest-neighbour shrink for the app window's preview: it draws this a few hundred pixels wide, and
@@ -143,22 +151,46 @@ export class OmtReceiver {
     private static PREVIEW_INTERVAL_MS = 100
     private static lastPreviewSent: { [id: string]: number } = {}
 
-    private static previewFrame(full: { xres: number; yres: number; data: Buffer }) {
-        if (full.xres <= this.PREVIEW_MAX_WIDTH) return { ...full, format: "bgra" as const }
-
-        const scale = Math.ceil(full.xres / this.PREVIEW_MAX_WIDTH)
+    private static previewFrame(full: PackedFrame): PackedFrame {
+        const scale = Math.max(1, Math.ceil(full.xres / this.PREVIEW_MAX_WIDTH))
         const width = Math.floor(full.xres / scale)
         const height = Math.floor(full.yres / scale)
         const data = Buffer.alloc(width * height * 4)
+        const source = full.data
+
+        // BT.709 above SD heights, matching the library's own auto-detection
+        const bt709 = full.yres >= 720
+        const kr = bt709 ? 1.5748 : 1.402
+        const kb = bt709 ? 1.8556 : 1.772
+        const gu = bt709 ? 0.1873 : 0.344136
+        const gv = bt709 ? 0.4681 : 0.714136
+        const clamp = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : v)
+
         for (let y = 0; y < height; y++) {
-            let target = y * width * 4
-            let sourceRow = y * scale * full.xres * 4
+            const sourceY = y * scale
             for (let x = 0; x < width; x++) {
-                full.data.copy(data, target, sourceRow + x * scale * 4, sourceRow + x * scale * 4 + 4)
-                target += 4
+                const sourceX = x * scale
+                const target = (y * width + x) * 4
+                if (full.format === "uyvy") {
+                    // UYVY packs two pixels per four bytes: U Y0 V Y1
+                    const pair = sourceX - (sourceX % 2)
+                    const i = sourceY * full.xres * 2 + pair * 2
+                    const luma = ((sourceX % 2 === 0 ? source[i + 1] : source[i + 3]) - 16) / 219
+                    const u = (source[i] - 128) / 224
+                    const v = (source[i + 2] - 128) / 224
+                    data[target] = clamp((luma + kr * v) * 255)
+                    data[target + 1] = clamp((luma - gu * u - gv * v) * 255)
+                    data[target + 2] = clamp((luma + kb * u) * 255)
+                } else {
+                    const i = (sourceY * full.xres + sourceX) * 4
+                    data[target] = source[i + 2]
+                    data[target + 1] = source[i + 1]
+                    data[target + 2] = source[i]
+                }
+                data[target + 3] = 255
             }
         }
-        return { xres: width, yres: height, data, format: "bgra" as const }
+        return { xres: width, yres: height, data, format: "rgba" }
     }
 
     static sendBuffer(id: string, frame: any) {

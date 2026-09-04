@@ -2,6 +2,7 @@ import { OMT } from "../../types/Channels"
 import type { Message } from "../../types/Socket"
 import { CaptureHelper } from "../capture/CaptureHelper"
 import { OmtReceiver } from "./OmtReceiver"
+import { OmtSender } from "./OmtSender"
 
 export async function receiveOMT(e: Electron.IpcMainEvent, msg: Message) {
     let data
@@ -16,10 +17,10 @@ export const omtResponses = {
     CAPTURE_STREAM: (data: { source: { name: string; urlAddress?: string; id: string }; outputId: string }) => OmtReceiver.captureStreamOMT(data),
     CAPTURE_DESTROY: (data: { id: string; outputId?: string }) => OmtReceiver.stopReceiversOMT(data),
 
-    OMT_DATA: (data: { id: string; framerate?: number }) => setDataOMT(data)
+    OMT_DATA: (data: { id: string; framerate?: number; name?: string; quality?: number | string }) => setDataOMT(data)
 }
 
-export function setDataOMT(data: { id: string; framerate?: number | string }) {
+export function setDataOMT(data: { id: string; framerate?: number | string; name?: string; quality?: number | string }) {
     if (!data?.id) return
 
     if (data.framerate) {
@@ -28,4 +29,15 @@ export function setDataOMT(data: { id: string; framerate?: number | string }) {
 
         CaptureHelper.updateFramerate(data.id)
     }
+
+    // the name and the quality (OMT's bandwidth/latency level) are fixed when a sender is created,
+    // so apply a change by recreating it — receivers reconnect on their own
+    const current = OmtSender.OMT[data.id]
+    if (!current?.sender) return
+
+    const name = data.name || current.name
+    const quality = data.quality ?? current.quality
+    if (name === current.name && String(quality ?? "") === String(current.quality ?? "")) return
+
+    void OmtSender.createSenderOMT(data.id, name, quality)
 }
