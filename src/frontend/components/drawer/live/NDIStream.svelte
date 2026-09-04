@@ -1,15 +1,12 @@
-<script lang="ts" context="module">
-    let streamInstances = 0
-</script>
-
 <script lang="ts">
     import { onDestroy, onMount } from "svelte"
     import { NDI } from "../../../../types/Channels"
     import { outputs } from "../../../stores"
-    import { destroy, receive, send } from "../../../utils/request"
+    import { send } from "../../../utils/request"
     import { findMatchingOut } from "../../helpers/output"
     import Card from "../Card.svelte"
     import { StreamCanvasRenderer } from "./streamCanvas"
+    import { onStreamFrame } from "../../../utils/streamPort"
     import SelectElem from "../../system/SelectElem.svelte"
 
     interface Screen {
@@ -35,25 +32,20 @@
     const renderer = new StreamCanvasRenderer()
     $: if (frame && canvas) renderer.draw(canvas, frame)
 
-    const receiveNDI = {
-        RECEIVE_STREAM: (data: { id: string; frame: any; time: number }) => {
-            if (data.id !== screen.id) return
-            loaded = true
+    const receiveStream = (data: { id: string; frame: any; time: number }) => {
+        if (data.id !== screen.id) return
+        loaded = true
 
-            // Take the newest frame rather than dropping by age. Svelte coalesces several arrivals in
-            // one tick into a single draw, so a burst still never renders a backlog, while an absolute
-            // age cut discarded every 4K frame: 16MB takes longer than that to deliver on its own.
-            frame = data.frame
-        }
+        // Take the newest frame rather than dropping by age. Svelte coalesces several arrivals in one
+        // tick into a single draw, so a burst still never renders a backlog, while an absolute age cut
+        // discarded every 4K frame: 16MB takes longer than that to deliver on its own.
+        frame = data.frame
     }
 
-    // the preload keeps one listener per id, so two components showing the same source must not share one
-    const receiverId = `${screen.id}#${++streamInstances}`
-
-    receive(NDI, receiveNDI, receiverId)
+    const stopStream = onStreamFrame(NDI, receiveStream)
     onDestroy(() => {
         renderer.destroy()
-        destroy(NDI, receiverId)
+        stopStream()
         if (background && !mirror) send(NDI, ["CAPTURE_DESTROY"], { id: screen.id, outputId: outputId || Object.keys($outputs)[0] })
     })
 
