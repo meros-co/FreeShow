@@ -1,3 +1,7 @@
+<script lang="ts" context="module">
+    let streamInstances = 0
+</script>
+
 <script lang="ts">
     import { onDestroy, onMount } from "svelte"
     import { NDI } from "../../../../types/Channels"
@@ -40,10 +44,15 @@
         }
     }
 
-    receive(NDI, receiveNDI, screen.id)
+    // The preload keeps one listener per id, so instances must not share one: two components showing
+    // the same source (a drawer card and an output's preview, say) would collapse to a single listener
+    // and whichever unmounted first would silence the other.
+    const receiverId = `${screen.id}#${++streamInstances}`
+
+    receive(NDI, receiveNDI, receiverId)
     onDestroy(() => {
         renderer.destroy()
-        destroy(NDI, screen.id)
+        destroy(NDI, receiverId)
         if (background && !mirror) send(NDI, ["CAPTURE_DESTROY"], { id: screen.id, outputId: Object.keys($outputs)[0] })
     })
 

@@ -1,3 +1,7 @@
+<script lang="ts" context="module">
+    let streamInstances = 0
+</script>
+
 <script lang="ts">
     import { onDestroy, onMount } from "svelte"
     import { BLACKMAGIC } from "../../../../types/Channels"
@@ -53,9 +57,14 @@
         }
     }
 
-    receive(BLACKMAGIC, receiveBlackmagic, screen.id)
+    // The preload keeps one listener per id, so instances must not share one: two components showing
+    // the same source (a drawer card and an output's preview, say) would collapse to a single listener
+    // and whichever unmounted first would silence the other.
+    const receiverId = `${screen.id}#${++streamInstances}`
+
+    receive(BLACKMAGIC, receiveBlackmagic, receiverId)
     onDestroy(() => {
-        destroy(BLACKMAGIC, screen.id)
+        destroy(BLACKMAGIC, receiverId)
         if (background && !mirror) send(BLACKMAGIC, ["STOP_RECEIVER"], { id: screen.id, outputId: Object.keys($outputs)[0] })
     })
 
