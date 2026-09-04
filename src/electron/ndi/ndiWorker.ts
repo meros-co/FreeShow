@@ -390,7 +390,11 @@ function mapOmtQuality(omt: any, quality?: number | string): number {
 }
 
 async function createOmtSender(id: string, name: string, quality?: number | string) {
-    if (OMTS[id]) stopOmtSender(id)
+    // replacing a live sender (a quality change): let the old one's socket and discovery registration
+    // go away first, so the replacement rebinds the same port and receivers find it again
+    const replacing = !!OMTS[id]
+    if (replacing) stopOmtSender(id)
+    if (replacing) await new Promise((resolve) => setTimeout(resolve, 250))
 
     OMTS[id] = { name }
     console.info("OMT - creating sender: " + name)

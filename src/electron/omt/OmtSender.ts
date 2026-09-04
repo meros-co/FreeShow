@@ -68,7 +68,9 @@ export class OmtSender {
     }
 
     static async createSenderOMT(id: string, name = "", quality?: number | string) {
-        if (this.OMT[id]) this.stopSenderOMT(id)
+        // replacing a live sender: let the worker retire the old one as part of creating the new one,
+        // so it can wait for the port and discovery registration to free up before rebinding
+        delete this.OMT[id]
 
         // the worker cannot set this itself (its process.env is a copy), so do it here first
         ensureOmtCodecSearchPath()

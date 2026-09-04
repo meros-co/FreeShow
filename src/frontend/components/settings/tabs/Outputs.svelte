@@ -141,12 +141,12 @@
 
     // omt
     // OMT's quality level is its bandwidth/latency control: lower quality compresses harder, so it
-    // costs less network and arrives sooner
+    // costs less network and arrives sooner. "Default" lets the encoder follow what receivers ask for.
     const omtQualities = [
-        { value: "Default", label: "settings.quality_default" },
-        { value: "Low", label: "settings.quality_low" },
-        { value: "Medium", label: "settings.quality_medium" },
-        { value: "High", label: "settings.quality_high" }
+        { value: "Default", label: "Automatic (receivers decide)" },
+        { value: "Low", label: "Low (least bandwidth)" },
+        { value: "Medium", label: "Medium" },
+        { value: "High", label: "High (most bandwidth)" }
     ]
     function updateOmtData(e: any, key: string) {
         let id = currentOutput?.id
@@ -161,8 +161,10 @@
 
         updateOutput("omtData", newData)
 
-        // the sender picks up name/quality changes by recreating itself, so nothing needs restarting
         send(OMT, ["OMT_DATA"], { id, ...newData })
+
+        // the encoder's quality is fixed when a sender is created, so changing it restarts the stream
+        if (key === "quality" || key === "name") newToast("toast.omt_reconnect")
     }
 
     // webrtc
