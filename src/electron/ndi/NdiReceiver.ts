@@ -1,5 +1,6 @@
 import { toApp } from ".."
 import { NDI } from "../../types/Channels"
+import { packStreamFrame, previewStreamFrame, type StreamFrameFormat } from "../capture/streamFrames"
 import { OutputHelper } from "../output/OutputHelper"
 
 let warned = false
@@ -20,13 +21,17 @@ export class NdiReceiver {
     private static findSourcesInterval: NodeJS.Timeout | null = null
     static allActiveReceivers: { [key: string]: any } = {}
     static sendToOutputs: string[] = []
+    private static fourCCUyvy: number | null = null
 
     private static async createReceiver(source: { name: string; urlAddress: string }, lowbandwidth = false) {
         try {
             const grandiose = await loadGrandiose()
             if (!grandiose) return null
 
-            const config: any = { source, colorFormat: grandiose.COLOR_FORMAT_RGBX_RGBA, allowVideoFields: false }
+            // UYVY is half the bytes of RGBA and every one of them costs main-thread time in IPC; the
+            // renderer converts it on the GPU. Sources with alpha still arrive as RGBA.
+            this.fourCCUyvy = grandiose.FOURCC_UYVY
+            const config: any = { source, colorFormat: grandiose.COLOR_FORMAT_UYVY_RGBA, allowVideoFields: false }
             if (lowbandwidth) config.bandwidth = grandiose.BANDWIDTH_LOWEST
 
             let timeout: NodeJS.Timeout | null = null
@@ -136,28 +141,10 @@ export class NdiReceiver {
         }
     }
 
-    private static updateAdaptiveDelay(processingTime: number, processingTimes: number[], currentDelay: number): { newTimes: number[]; newDelay: number } {
-        processingTimes.push(processingTime)
-        if (processingTimes.length > 10) processingTimes.shift()
-
-        let adaptiveDelay = currentDelay
-        if (processingTimes.length >= 5) {
-            const avgTime = processingTimes.reduce((a, b) => a + b) / processingTimes.length
-            if (avgTime < 5) adaptiveDelay = Math.max(8, adaptiveDelay - 1)
-            else if (avgTime > 15) adaptiveDelay = Math.min(50, adaptiveDelay + 2)
-        }
-
-        return { newTimes: processingTimes, newDelay: adaptiveDelay }
-    }
-
     private static async frameLoop(sourceId: string, receiverData: any) {
         let consecutiveErrors = 0
-        let processingTimes: number[] = []
-        let adaptiveDelay = 16
 
         while (receiverData && !receiverData.shouldStop) {
-            const loopStart = Date.now()
-
             try {
                 // Skip this iteration if another fetch is already in progress for this receiver
                 if (receiverData.fetchInProgress) {
@@ -184,12 +171,9 @@ export class NdiReceiver {
                         this.sendBuffer(sourceId, rawFrame)
                         consecutiveErrors = 0
 
-                        const processingTime = Date.now() - loopStart
-                        const result = this.updateAdaptiveDelay(processingTime, processingTimes, adaptiveDelay)
-                        processingTimes = result.newTimes
-                        adaptiveDelay = result.newDelay
-
-                        await new Promise((resolve) => setTimeout(resolve, adaptiveDelay))
+                        // video() already blocks until the next frame, so pace on the source: waiting
+                        // after every frame pushes the next fetch past the frame after it
+                        await new Promise((resolve) => setImmediate(resolve))
                         continue
                     }
                 } finally {
@@ -260,11 +244,23 @@ export class NdiReceiver {
         }
     }
 
+    // the app window draws this a few hundred pixels wide
+    private static PREVIEW_MAX_WIDTH = 480
+
     static sendBuffer(id: string, frame: any) {
-        if (!frame) return
-        const msg = { channel: "RECEIVE_STREAM", data: { id, frame, time: Date.now() } }
-        toApp(NDI, msg)
-        this.sendToOutputs.forEach((outputId) => OutputHelper.Send.sendToWindow(outputId, msg, NDI))
+        if (!frame?.data) return
+
+        const format: StreamFrameFormat = frame.fourCC === this.fourCCUyvy ? "uyvy" : "rgba"
+        const packed = packStreamFrame(frame.data, frame.xres, frame.yres, frame.lineStrideBytes || 0, format)
+        if (!packed) return
+
+        // outputs render the stream itself and need every pixel
+        const time = Date.now()
+        this.sendToOutputs.forEach((outputId) => OutputHelper.Send.sendToWindow(outputId, { channel: "RECEIVE_STREAM", data: { id, frame: packed, time } }, NDI))
+
+        // the app window only ever previews it (drawer card, output mirror), so it gets a small copy:
+        // full frames here cost the main thread more than the rest of this path combined
+        toApp(NDI, { channel: "RECEIVE_STREAM", data: { id, frame: previewStreamFrame(packed, this.PREVIEW_MAX_WIDTH), time } })
     }
 
     static async captureStreamNDI({ source, outputId }: { source: { name: string; urlAddress: string; id: string }; outputId: string }) {

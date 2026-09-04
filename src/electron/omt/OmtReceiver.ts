@@ -1,11 +1,10 @@
 import { toApp } from ".."
 import { OMT } from "../../types/Channels"
+import { packStreamFrame, previewStreamFrame, type StreamFrameFormat } from "../capture/streamFrames"
 import { loadOMT } from "./omtModule"
 import { OutputHelper } from "../output/OutputHelper"
 
 type Source = { name: string; urlAddress?: string; id: string }
-type FrameFormat = "uyvy" | "bgra" | "rgba"
-type PackedFrame = { xres: number; yres: number; data: Buffer; format: FrameFormat }
 
 export class OmtReceiver {
     static omtDisabled = false
@@ -127,78 +126,14 @@ export class OmtReceiver {
         }
     }
 
-    // tightly pack an OMT frame (drop row padding), leaving the pixels in the format the library gave us:
-    // converting here would mean a per-pixel pass on the main thread for every frame.
-    private static packFrame(frame: any): PackedFrame | null {
-        const width: number = frame.width
-        const height: number = frame.height
-        const format: FrameFormat = frame.codec === this.codecs?.UYVY ? "uyvy" : "bgra"
-        const rowBytes = format === "uyvy" ? width * 2 : width * 4
-        const stride: number = frame.stride || rowBytes
-        const source: Buffer = frame.data
-
-        let data: Buffer
-        if (stride === rowBytes) {
-            data = source
-        } else {
-            data = Buffer.alloc(rowBytes * height)
-            for (let y = 0; y < height; y++) source.copy(data, y * rowBytes, y * stride, y * stride + rowBytes)
-        }
-
-        if (data.length !== rowBytes * height) return null
-        return { xres: width, yres: height, data, format }
-    }
-
-    // nearest-neighbour shrink for the app window's preview: it draws this a few hundred pixels wide, and
-    // every byte sent costs main-thread time in IPC
+    // the app window draws this a few hundred pixels wide
     private static PREVIEW_MAX_WIDTH = 480
-
-    private static previewFrame(full: PackedFrame): PackedFrame {
-        const scale = Math.max(1, Math.ceil(full.xres / this.PREVIEW_MAX_WIDTH))
-        const width = Math.floor(full.xres / scale)
-        const height = Math.floor(full.yres / scale)
-        const data = Buffer.alloc(width * height * 4)
-        const source = full.data
-
-        // BT.709 above SD heights, matching the library's own auto-detection
-        const bt709 = full.yres >= 720
-        const kr = bt709 ? 1.5748 : 1.402
-        const kb = bt709 ? 1.8556 : 1.772
-        const gu = bt709 ? 0.1873 : 0.344136
-        const gv = bt709 ? 0.4681 : 0.714136
-        const clamp = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : v)
-
-        for (let y = 0; y < height; y++) {
-            const sourceY = y * scale
-            for (let x = 0; x < width; x++) {
-                const sourceX = x * scale
-                const target = (y * width + x) * 4
-                if (full.format === "uyvy") {
-                    // UYVY packs two pixels per four bytes: U Y0 V Y1
-                    const pair = sourceX - (sourceX % 2)
-                    const i = sourceY * full.xres * 2 + pair * 2
-                    const luma = ((sourceX % 2 === 0 ? source[i + 1] : source[i + 3]) - 16) / 219
-                    const u = (source[i] - 128) / 224
-                    const v = (source[i + 2] - 128) / 224
-                    data[target] = clamp((luma + kr * v) * 255)
-                    data[target + 1] = clamp((luma - gu * u - gv * v) * 255)
-                    data[target + 2] = clamp((luma + kb * u) * 255)
-                } else {
-                    const i = (sourceY * full.xres + sourceX) * 4
-                    data[target] = source[i + 2]
-                    data[target + 1] = source[i + 1]
-                    data[target + 2] = source[i]
-                }
-                data[target + 3] = 255
-            }
-        }
-        return { xres: width, yres: height, data, format: "rgba" }
-    }
 
     static sendBuffer(id: string, frame: any) {
         if (!frame?.data) return
 
-        const packed = this.packFrame(frame)
+        const format: StreamFrameFormat = frame.codec === this.codecs?.UYVY ? "uyvy" : "bgra"
+        const packed = packStreamFrame(frame.data, frame.width, frame.height, frame.stride || 0, format)
         if (!packed) return
 
         // outputs render the stream itself and need every pixel
@@ -208,7 +143,7 @@ export class OmtReceiver {
         // the app window only ever previews it (drawer card, output mirror), so it gets a small copy of
         // every frame: full frames here saturated the main thread, but a downscaled one is cheap enough
         // to keep the preview as smooth as the output
-        toApp(OMT, { channel: "RECEIVE_STREAM", data: { id, frame: this.previewFrame(packed), time } })
+        toApp(OMT, { channel: "RECEIVE_STREAM", data: { id, frame: previewStreamFrame(packed, this.PREVIEW_MAX_WIDTH), time } })
     }
 
     private static destroyReceiver(sourceId: string) {

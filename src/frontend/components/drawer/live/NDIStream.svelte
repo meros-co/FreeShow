@@ -5,6 +5,7 @@
     import { destroy, receive, send } from "../../../utils/request"
     import { findMatchingOut } from "../../helpers/output"
     import Card from "../Card.svelte"
+    import { StreamCanvasRenderer } from "./streamCanvas"
     import SelectElem from "../../system/SelectElem.svelte"
 
     interface Screen {
@@ -24,20 +25,8 @@
         } else send(NDI, ["RECEIVE_STREAM"], { source: screen })
     })
 
-    $: if (frame) setCanvas()
-    function setCanvas() {
-        if (!canvas) return
-
-        let ctx = canvas.getContext("2d")
-
-        const WIDTH = frame.xres
-        const HEIGHT = frame.yres
-        canvas.width = WIDTH
-        canvas.height = HEIGHT
-
-        const imageData = new ImageData(new Uint8ClampedArray(frame.data), WIDTH, HEIGHT)
-        ctx?.putImageData(imageData, 0, 0)
-    }
+    const renderer = new StreamCanvasRenderer()
+    $: if (frame && canvas) renderer.draw(canvas, frame)
 
     const receiveNDI = {
         RECEIVE_STREAM: (data: { id: string; frame: any; time: number }) => {
@@ -53,6 +42,7 @@
 
     receive(NDI, receiveNDI, screen.id)
     onDestroy(() => {
+        renderer.destroy()
         destroy(NDI, screen.id)
         if (background && !mirror) send(NDI, ["CAPTURE_DESTROY"], { id: screen.id, outputId: Object.keys($outputs)[0] })
     })
