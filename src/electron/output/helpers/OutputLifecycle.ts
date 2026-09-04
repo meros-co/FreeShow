@@ -693,12 +693,12 @@ export class OutputLifecycle {
             const framerate = output?.captureOptions?.framerates?.ndi || 30
             const ratio = height ? width / height : 16 / 9
             const transparent = output?.transparent === true
-            // NDI-only outputs get GPU-converted UYVY/UYVA. With an OMT sender active the readback stays
-            // BGRA (OMT's wire format) and the worker converts for NDI off-main; a mixed output also gets
-            // a small BGRA GPU-downscale for server/stage in the same readback pass.
+            // NDI and OMT both encode YUV, so the readback converts on the GPU to UYVY (or UYVA when the
+            // output is transparent); a mixed output also gets a small BGRA GPU-downscale for server/stage
+            // in the same readback pass.
             const hasOmt = !!OmtSender.OMT[id]?.sender
             const omtFramerate = output?.captureOptions?.framerates?.omt || framerate
-            const fmt = hasOmt ? 0 : transparent ? 2 : 1
+            const fmt = transparent ? 2 : 1
             const members = NdiSender.NDI[id]?.sender ? RenderGroups.members(id).filter((m) => m === id || (OutputHelper.getOutput(m) as any)?.renderGroupRenderer === id) : []
             // send pace rate is PER MEMBER: each member's sender paces at its own resolved rate
             // (configured framerate when connected, idle floor when not) — sourcing one rate from the

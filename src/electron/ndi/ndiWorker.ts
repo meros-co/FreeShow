@@ -464,16 +464,20 @@ function stopOmtSender(id: string) {
     releaseReadbackResources(id)
 }
 
-// builds the OMT video frame template (BGRA; the timestamp is re-stamped at send time by the pacer/queue)
-function makeOmtVideoFrame(omt: any, buffer: Buffer, size: { width: number; height: number }, ratio: number, framerate: number, transparent: boolean) {
+// builds the OMT video frame template (the timestamp is re-stamped at send time by the pacer/queue)
+// format: 0 = BGRA, 1 = UYVY, 2 = UYVA (the readback formats osr-capture produces). YUV costs half the
+// bytes of BGRA over the bus and is what the encoder wants anyway, so it is the normal case.
+function makeOmtVideoFrame(omt: any, buffer: Buffer, size: { width: number; height: number }, ratio: number, framerate: number, transparent: boolean, format: number) {
+    const uyvy = format === 1 || format === 2
+    const hasAlpha = format === 2 || (format === 0 && transparent)
     return {
         type: omt.FrameType.Video,
         timestamp: (timeStart + process.hrtime.bigint()) / TIMECODE_DIVISOR,
-        codec: omt.Codec.BGRA,
+        codec: uyvy ? (format === 2 ? omt.Codec.UYVA : omt.Codec.UYVY) : omt.Codec.BGRA,
         width: size.width,
         height: size.height,
-        stride: size.width * 4,
-        flags: transparent ? omt.VideoFlags.Alpha : omt.VideoFlags.None,
+        stride: size.width * (uyvy ? 2 : 4),
+        flags: hasAlpha ? omt.VideoFlags.Alpha : omt.VideoFlags.None,
         frameRateN: Math.round(framerate * 1000),
         frameRateD: 1000,
         aspectRatio: ratio,
@@ -482,8 +486,8 @@ function makeOmtVideoFrame(omt: any, buffer: Buffer, size: { width: number; heig
     }
 }
 
-// main-path OMT video (mixed outputs that stay on the main capture path): BGRA in, latest-wins pending slot
-async function sendOmtVideoBuffer(id: string, buffer: Buffer, { size, ratio, framerate, transparent }: { size: { width: number; height: number }; ratio: number; framerate: number; transparent: boolean }) {
+// main-path OMT video (mixed outputs that stay on the main capture path): latest-wins pending slot
+async function sendOmtVideoBuffer(id: string, buffer: Buffer, { size, ratio, framerate, transparent, format = 0 }: { size: { width: number; height: number }; ratio: number; framerate: number; transparent: boolean; format?: number }) {
     const senderData = OMTS[id]
     if (!senderData?.sender) return
     senderData.offMain = false
@@ -493,7 +497,7 @@ async function sendOmtVideoBuffer(id: string, buffer: Buffer, { size, ratio, fra
 
     if (senderData.pendingVideoFrame && senderData.pendingReal) senderData.coalescedReal = (senderData.coalescedReal || 0) + 1
     senderData.pendingReal = true
-    senderData.pendingVideoFrame = makeOmtVideoFrame(omt, buffer, size, ratio, framerate, transparent)
+    senderData.pendingVideoFrame = makeOmtVideoFrame(omt, buffer, size, ratio, framerate, transparent, format)
 
     void sendQueuedVideoFrame(OMTS, id, "videoDoneOmt")
 }
@@ -755,9 +759,8 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
         // pacer still holds ever tearing. ONE refcounted copy is shared across all fan-out members.
         const activeMembers = hasNdi ? members.filter((m) => NDI[m]?.sender) : []
         if (activeMembers.length) {
-            // when the readback is BGRA (format 0: shared with an OMT sender that needs BGRA), convert to
-            // NDI's UYVY/UYVA here (native osr-capture converter, JS fallback) — one convert per frame,
-            // still off the main thread
+            // a BGRA readback (the legacy capturePage path) still has to become NDI's UYVY/UYVA — one
+            // convert per frame, off the main thread
             let ndiBuffer = buffer
             let ndiFormat = format
             if (format === 0) {
@@ -820,9 +823,9 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             }
         }
 
-        // OMT fan-out: the sender takes the BGRA readback directly (format 0 is guaranteed by main when an
-        // OMT sender is active); its own pacer paces at the OMT-configured rate with its own refcounted copy
-        if (hasOmt && format === 0) {
+        // OMT fan-out: the sender takes the readback in whatever format it arrived (UYVY/UYVA normally,
+        // BGRA on the legacy path); its own pacer runs at the OMT rate with its own refcounted copy
+        if (hasOmt) {
             const omt = await loadOMT()
             if (omt) {
                 const od = OMTS[id]!
@@ -835,7 +838,7 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
                     od.paceTimer = undefined
                     startPacer(OMTS, id)
                 }
-                const oFrame = makeOmtVideoFrame(omt, obuf.buf, size, ratio, ofr, opts.transparent !== false)
+                const oFrame = makeOmtVideoFrame(omt, obuf.buf, size, ratio, ofr, opts.transparent !== false, format)
                 od.paceCap = Math.max(2, (opts.depth ?? 1) + 1)
                 const oQueue = (od.paceQueue ||= [])
                 while (oQueue.length >= od.paceCap) {

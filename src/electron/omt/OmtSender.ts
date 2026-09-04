@@ -89,7 +89,7 @@ export class OmtSender {
 
     // main-path video (mixed outputs): BGRA buffer, transferred zero-copy to the worker when it owns its
     // whole backing ArrayBuffer, copied otherwise (a transfer must never detach a shared/pooled buffer)
-    static sendVideoBufferOMT(id: string, buffer: Buffer, { size = { width: 1280, height: 720 }, ratio = 16 / 9, framerate = 1, transparent = true }: { size?: { width: number; height: number }; ratio?: number; framerate?: number; transparent?: boolean } = {}) {
+    static sendVideoBufferOMT(id: string, buffer: Buffer, { size = { width: 1280, height: 720 }, ratio = 16 / 9, framerate = 1, transparent = true, format = 0 }: { size?: { width: number; height: number }; ratio?: number; framerate?: number; transparent?: boolean; format?: number } = {}) {
         const data = this.OMT[id]
         const worker = this.getWorker()
         if (!data?.sender || !worker) return
@@ -102,7 +102,7 @@ export class OmtSender {
         } else {
             arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer
         }
-        worker.postMessage({ type: "videoOmt", id, buffer: arrayBuffer, byteOffset: 0, byteLength: arrayBuffer.byteLength, opts: { size, ratio, framerate, transparent } }, [arrayBuffer])
+        worker.postMessage({ type: "videoOmt", id, buffer: arrayBuffer, byteOffset: 0, byteLength: arrayBuffer.byteLength, opts: { size, ratio, framerate, transparent, format } }, [arrayBuffer])
     }
 
     // `buffer` is planar Float32 LE (the processAudio contract) = OMT's FPA1 format directly.

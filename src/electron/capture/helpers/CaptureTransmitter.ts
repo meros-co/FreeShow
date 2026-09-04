@@ -102,6 +102,9 @@ export class CaptureTransmitter {
             const transparent = OutputHelper.getOutput(captureId)?.transparent === true
             return transparent ? 2 : 1
         }
+        // OMT encodes YUV, so a YUV readback is both half the bytes over the bus and one conversion less
+        // inside the encoder. Alpha only when transparency is explicitly enabled, as for NDI.
+        if (only === "omt") return OutputHelper.getOutput(captureId)?.transparent === true ? 2 : 1
         // SDI carries no alpha (key is a separate signal) -> UYVY, and only when the card config matches.
         if (only === "blackmagic" && size && BlackmagicSender.canAcceptRawUyvy(captureId, size)) return 1
         // WebRTC's host renderer wants RGBA (ImageData) -> GPU-swizzle during readback so the main thread never
@@ -389,7 +392,7 @@ export class CaptureTransmitter {
                 this.sendRawToNdi(captureId, buffer, size, format)
                 break
             case "omt":
-                this.sendRawToOmt(captureId, buffer, size)
+                this.sendRawToOmt(captureId, buffer, size, format)
                 break
             case "webrtc":
                 this.sendRawToWebRtc(captureId, buffer, size, format)
@@ -435,16 +438,16 @@ export class CaptureTransmitter {
         NdiSender.sendVideoBufferNDI(captureId, Buffer.from(buffer), { size, ratio, framerate, transparent, format })
     }
 
-    // OMT takes BGRA directly (format is always 0 for an omt consumer — getReadbackFormat never routes
-    // UYVY/RGBA to it). Owned copy: the shared readback buffer is recycled and reread by other consumers.
-    private static sendRawToOmt(captureId: string, buffer: Buffer, size: Size) {
+    // format 0 = BGRA, 1 = UYVY, 2 = UYVA. Owned copy: the shared readback buffer is recycled and reread
+    // by other consumers.
+    private static sendRawToOmt(captureId: string, buffer: Buffer, size: Size, format: number) {
         if (!OmtSender.OMT[captureId]?.sender) return
         if (this.shouldSkipUnchangedNonBlackmagicFrame("omt", captureId, buffer, size)) return
         const output = OutputHelper.getOutput(captureId)
         const ratio = size.height ? size.width / size.height : 16 / 9
         const transparent = output?.transparent !== false
         const framerate = output?.captureOptions?.framerates?.omt || 30
-        OmtSender.sendVideoBufferOMT(captureId, Buffer.from(buffer), { size, ratio, framerate, transparent })
+        OmtSender.sendVideoBufferOMT(captureId, Buffer.from(buffer), { size, ratio, framerate, transparent, format })
     }
 
 
@@ -541,7 +544,8 @@ export class CaptureTransmitter {
         const transparent = output?.transparent !== false
         const framerate = output?.captureOptions?.framerates?.omt || 30
 
-        OmtSender.sendVideoBufferOMT(captureId, buffer, { size, ratio, framerate, transparent })
+        // toBitmap always yields BGRA
+        OmtSender.sendVideoBufferOMT(captureId, buffer, { size, ratio, framerate, transparent, format: 0 })
     }
 
     private static convertToRGBA(buffer: Buffer): void {
