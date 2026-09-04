@@ -1,16 +1,12 @@
-// Shared frame handling for the NDI and OMT receive paths.
-//
-// Both deliver full-resolution frames to the output windows that render them, and a small copy to the
-// app window, which only ever previews the stream. IPC cost scales with frame size, so full frames to
-// the app window cost the main thread more than everything else in these paths combined.
+// Shared frame handling for the NDI and OMT receive paths: full-resolution frames to the output windows
+// that render them, and a small copy to the app window, which only ever previews the stream.
 
 export type StreamFrameFormat = "uyvy" | "rgba" | "bgra"
 export type StreamFrame = { xres: number; yres: number; data: Buffer; format: StreamFrameFormat }
 
 const BYTES_PER_PIXEL: { [format in StreamFrameFormat]: number } = { uyvy: 2, rgba: 4, bgra: 4 }
 
-// Drop row padding, leaving the pixels in the format the library produced: converting here would mean
-// a pass over every pixel of every frame on the main thread. The renderer converts while drawing.
+// Drop row padding, leaving the pixels in the format the library produced; the renderer converts while drawing.
 export function packStreamFrame(data: Buffer, width: number, height: number, stride: number, format: StreamFrameFormat): StreamFrame | null {
     const rowBytes = width * BYTES_PER_PIXEL[format]
     const packed = stride === rowBytes ? data : Buffer.alloc(rowBytes * height)
@@ -22,8 +18,7 @@ export function packStreamFrame(data: Buffer, width: number, height: number, str
     return { xres: width, yres: height, data: packed, format }
 }
 
-// Nearest-neighbour shrink to RGBA for the app window's preview, which draws this a few hundred pixels
-// wide. Converting the sampled pixels only keeps this proportional to the preview, not the source.
+// Nearest-neighbour shrink to RGBA for the app window's preview, converting only the sampled pixels.
 export function previewStreamFrame(full: StreamFrame, maxWidth = 480): StreamFrame {
     const scale = Math.max(1, Math.ceil(full.xres / maxWidth))
     const width = Math.floor(full.xres / scale)

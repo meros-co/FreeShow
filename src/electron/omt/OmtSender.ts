@@ -7,11 +7,7 @@ import { ensureOmtCodecSearchPath } from "./omtModule"
 // https://github.com/openmediatransport/libomtnet
 // https://github.com/schplay/openmediatransport-node
 
-// The OMT engine (libomt sender lifecycle, send-dispatch, pacer) runs in the shared NDI/OMT
-// worker_thread (../ndi/ndiWorker) so it stays OFF the main thread — an NDI+OMT output shares one
-// readback per frame there. This class is the thin main-thread proxy, mirroring NdiSender: it forwards
-// create/video/audio/destroy messages, keeps a lightweight mirror of each sender (name/status/busy) and
-// relays connection status back to the app.
+// OMT sender proxy: delegates OMT encoding and dispatch to the shared NDI/OMT worker thread (../ndi/ndiWorker)
 
 export class OmtSender {
     private static readonly MAX_INFLIGHT_SENDS = 3
@@ -68,8 +64,7 @@ export class OmtSender {
     }
 
     static async createSenderOMT(id: string, name = "", quality?: number | string) {
-        // replacing a live sender: let the worker retire the old one as part of creating the new one,
-        // so it can wait for the port and discovery registration to free up before rebinding
+        // let the worker retire a live sender as part of the create, so its port and discovery registration free up first
         delete this.OMT[id]
 
         // the worker cannot set this itself (its process.env is a copy), so do it here first
@@ -89,8 +84,7 @@ export class OmtSender {
         NdiSender.getSharedWorker()?.postMessage({ type: "destroyOmt", id })
     }
 
-    // main-path video (mixed outputs): BGRA buffer, transferred zero-copy to the worker when it owns its
-    // whole backing ArrayBuffer, copied otherwise (a transfer must never detach a shared/pooled buffer)
+    // transferred zero-copy when the buffer owns its whole ArrayBuffer, copied otherwise (a transfer must never detach a pooled buffer)
     static sendVideoBufferOMT(id: string, buffer: Buffer, { size = { width: 1280, height: 720 }, ratio = 16 / 9, framerate = 1, transparent = true, format = 0 }: { size?: { width: number; height: number }; ratio?: number; framerate?: number; transparent?: boolean; format?: number } = {}) {
         const data = this.OMT[id]
         const worker = this.getWorker()
@@ -107,8 +101,7 @@ export class OmtSender {
         worker.postMessage({ type: "videoOmt", id, buffer: arrayBuffer, byteOffset: 0, byteLength: arrayBuffer.byteLength, opts: { size, ratio, framerate, transparent, format } }, [arrayBuffer])
     }
 
-    // `buffer` is planar Float32 LE (the processAudio contract) = OMT's FPA1 format directly.
-    // Clone (never transfer): audio buffers are small and possibly pooled.
+    // planar Float32 LE (the processAudio contract) is OMT's FPA1 format directly; clone rather than transfer, as these may be pooled
     static async sendAudioBufferOMT(buffer: Buffer, { sampleRate, channelCount }: { sampleRate: number; channelCount: number }) {
         const hasSender = Object.values(this.OMT).some((s) => s?.sender)
         const worker = hasSender ? this.getWorker() : null

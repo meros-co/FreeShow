@@ -4,10 +4,8 @@ import path from "path"
 import { isMainThread } from "worker_threads"
 
 // Windows resolves the OMT .NET layer's VMX codec DLL (libvmx) through the process search path, which
-// does not include the addon's own folder — without this every video encode/decode throws
-// DllNotFoundException, senders transmit nothing and receivers get no frames.
-// Main thread only: a worker's process.env is a private copy that never reaches the real process
-// environment the OS consults when loading a DLL, so the send worker relies on main setting this first.
+// does not include the addon's own folder — without this every encode/decode throws DllNotFoundException.
+// Main thread only: a worker's process.env is a private copy the OS DLL loader never sees.
 let searchPathReady = false
 export function ensureOmtCodecSearchPath() {
     if (searchPathReady || process.platform !== "win32" || !isMainThread) return

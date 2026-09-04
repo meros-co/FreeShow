@@ -77,10 +77,8 @@ type Sender = {
     realGaps?: number[] // FS_CAP_STATS: gaps between consecutive REAL send calls this window (mean/p95 reported)
 }
 const NDI: { [id: string]: Sender } = {}
-// OMT senders live in the same worker so an NDI+OMT output shares ONE readback per frame; the pacer,
-// queue and audio machinery are shared via the Sender protocol adapters above
+// OMT senders live in the same worker, so an NDI+OMT output shares one readback per frame
 const OMTS: { [id: string]: Sender } = {}
-
 
 // FS_CAP_STATS: once/sec per sender — sentReal (wire-unique fps), sentRepeat (static re-sends),
 // coalescedReal (real frames lost at the send stage), pacer counters, wireGap (send evenness),
@@ -108,9 +106,7 @@ if (process.env.FS_CAP_STATS) {
                 const sorted = [...gaps].sort((a, b) => a - b)
                 gapP95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))]
             }
-            console.info(
-                `[SEND-STATS ${id}] sentReal=${s.sentReal || 0} sentRepeat=${s.sentRepeat || 0} coalescedReal=${s.coalescedReal || 0} paceQ=${s.paceQueue?.length || 0} paceMisses=${s.paceMisses || 0} paceBusy=${s.paceBusy || 0} wireGap(mean=${Math.round(gapMean)} p95=${Math.round(gapP95)}) avgSendMs=${avg} rb=${rb} cpuCores=${cpuCores.toFixed(2)}`
-            )
+            console.info(`[SEND-STATS ${id}] sentReal=${s.sentReal || 0} sentRepeat=${s.sentRepeat || 0} coalescedReal=${s.coalescedReal || 0} paceQ=${s.paceQueue?.length || 0} paceMisses=${s.paceMisses || 0} paceBusy=${s.paceBusy || 0} wireGap(mean=${Math.round(gapMean)} p95=${Math.round(gapP95)}) avgSendMs=${avg} rb=${rb} cpuCores=${cpuCores.toFixed(2)}`)
             s.sentReal = 0
             s.sentRepeat = 0
             s.coalescedReal = 0
@@ -208,8 +204,7 @@ function stopSender(id: string) {
 }
 
 // free the worker's reused readback buffers for an output — shared by the NDI and OMT sides, so only
-// release once BOTH senders for the id are gone. Off-main uses per-seq slotted keys (id#0/id#1), each
-// with its own pooled buffers, so release every slot ever allocated (high-water mark).
+// release once both senders for the id are gone. Off-main uses per-seq slotted keys, so release every slot.
 function releaseReadbackResources(id: string) {
     if (NDI[id] || OMTS[id]) return
     try {
@@ -279,10 +274,14 @@ function bgraToUyvy(bgra: Buffer, width: number, height: number): Buffer {
         let si = y * rowIn
         let di = y * rowOut
         for (let x = 0; x < width; x += 2) {
-            const b0 = bgra[si], g0 = bgra[si + 1], r0 = bgra[si + 2]
-            const b1 = bgra[si + 4], g1 = bgra[si + 5], r1 = bgra[si + 6]
-            let u = (((-43 * r0 - 85 * g0 + 128 * b0) >> 8) + 128)
-            let v = (((128 * r0 - 107 * g0 - 21 * b0) >> 8) + 128)
+            const b0 = bgra[si],
+                g0 = bgra[si + 1],
+                r0 = bgra[si + 2]
+            const b1 = bgra[si + 4],
+                g1 = bgra[si + 5],
+                r1 = bgra[si + 6]
+            let u = ((-43 * r0 - 85 * g0 + 128 * b0) >> 8) + 128
+            let v = ((128 * r0 - 107 * g0 - 21 * b0) >> 8) + 128
             out[di] = u < 0 ? 0 : u > 255 ? 255 : u // U
             out[di + 1] = (77 * r0 + 150 * g0 + 29 * b0) >> 8 // Y0 (0..255, no clamp needed)
             out[di + 2] = v < 0 ? 0 : v > 255 ? 255 : v // V
@@ -306,10 +305,16 @@ function bgraToUyva(bgra: Buffer, width: number, height: number): Buffer {
         let di = y * rowUyvy
         let ai = uyvySize + y * width
         for (let x = 0; x < width; x += 2) {
-            const b0 = bgra[si], g0 = bgra[si + 1], r0 = bgra[si + 2], a0 = bgra[si + 3]
-            const b1 = bgra[si + 4], g1 = bgra[si + 5], r1 = bgra[si + 6], a1 = bgra[si + 7]
-            let u = (((-43 * r0 - 85 * g0 + 128 * b0) >> 8) + 128)
-            let v = (((128 * r0 - 107 * g0 - 21 * b0) >> 8) + 128)
+            const b0 = bgra[si],
+                g0 = bgra[si + 1],
+                r0 = bgra[si + 2],
+                a0 = bgra[si + 3]
+            const b1 = bgra[si + 4],
+                g1 = bgra[si + 5],
+                r1 = bgra[si + 6],
+                a1 = bgra[si + 7]
+            let u = ((-43 * r0 - 85 * g0 + 128 * b0) >> 8) + 128
+            let v = ((128 * r0 - 107 * g0 - 21 * b0) >> 8) + 128
             out[di] = u < 0 ? 0 : u > 255 ? 255 : u // U
             out[di + 1] = (77 * r0 + 150 * g0 + 29 * b0) >> 8 // Y0
             out[di + 2] = v < 0 ? 0 : v > 255 ? 255 : v // V
@@ -371,8 +376,6 @@ async function sendVideoBuffer(id: string, buffer: Buffer, { size, ratio, framer
 
     void sendQueuedVideoFrame(NDI, id, "videoDone")
 }
-
-// ---- OMT sender lifecycle + main-path sends --------------------------------------------------------------
 
 function mapOmtQuality(omt: any, quality?: number | string): number {
     if (typeof quality === "number") return quality
@@ -769,9 +772,7 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             let ndiFormat = format
             if (format === 0) {
                 const useAlpha = opts.transparent !== false
-                ndiBuffer = useAlpha
-                    ? (osr.convertBgraToUyva ? osr.convertBgraToUyva(buffer, size.width, size.height) : bgraToUyva(buffer, size.width, size.height))
-                    : (osr.convertBgraToUyvy ? osr.convertBgraToUyvy(buffer, size.width, size.height) : bgraToUyvy(buffer, size.width, size.height))
+                ndiBuffer = useAlpha ? (osr.convertBgraToUyva ? osr.convertBgraToUyva(buffer, size.width, size.height) : bgraToUyva(buffer, size.width, size.height)) : osr.convertBgraToUyvy ? osr.convertBgraToUyvy(buffer, size.width, size.height) : bgraToUyvy(buffer, size.width, size.height)
                 ndiFormat = useAlpha ? 2 : 1
             }
             const fourCC: number = ndiFormat === 2 ? grandiose.FOURCC_UYVA : grandiose.FOURCC_UYVY

@@ -102,8 +102,6 @@ export class CaptureTransmitter {
             const transparent = OutputHelper.getOutput(captureId)?.transparent === true
             return transparent ? 2 : 1
         }
-        // OMT encodes YUV, so a YUV readback is both half the bytes over the bus and one conversion less
-        // inside the encoder. Alpha only when transparency is explicitly enabled, as for NDI.
         if (only === "omt") return OutputHelper.getOutput(captureId)?.transparent === true ? 2 : 1
         // SDI carries no alpha (key is a separate signal) -> UYVY, and only when the card config matches.
         if (only === "blackmagic" && size && BlackmagicSender.canAcceptRawUyvy(captureId, size)) return 1
@@ -113,11 +111,7 @@ export class CaptureTransmitter {
         return 0
     }
 
-    // Off-main eligibility for a mixed output: an output with an NDI/OMT sender can run its WHOLE frame
-    // pipeline off the main thread IFF its only other consumers are server/stage. The worker reads back the
-    // frame AND a GPU-downscaled small BGRA (for server/stage) in one pass. Returns the heavy consumer keys
-    // (empty for an NDI/OMT-only output), or null when a consumer that needs the full-res main path
-    // (webrtc/rtmp/blackmagic) is present, so the caller keeps the main path.
+    // Returns non-NDI/OMT consumers eligible for off-main capture (server/stage), or null if full-res path needed
     static getHeavyOffMainConsumers(captureId: string): string[] | null {
         const heavy = Object.keys(this.channels)
             .filter((k) => k.startsWith(`${captureId}-`))
@@ -340,7 +334,6 @@ export class CaptureTransmitter {
 
     private static transmitFrameBody(captureId: string, image: NativeImage | null, raw: { buffer: Buffer; size: Size; format?: number } | undefined, frameTimestamp: number, captureOptions: any, framerates: any) {
         {
-
             const baseCaptureFrameRate = CaptureHelper.getMaxActiveFramerate(framerates || {}, captureOptions.options || {})
 
             // Non-buffer consumers (server/stage) build a NativeImage and RESIZE it on the MAIN thread. At 4K
@@ -449,7 +442,6 @@ export class CaptureTransmitter {
         const framerate = output?.captureOptions?.framerates?.omt || 30
         OmtSender.sendVideoBufferOMT(captureId, Buffer.from(buffer), { size, ratio, framerate, transparent, format })
     }
-
 
     private static sendRawToWebRtc(captureId: string, buffer: Buffer, size: Size, format = 0) {
         if (!WebRtcHost.isRunning()) return

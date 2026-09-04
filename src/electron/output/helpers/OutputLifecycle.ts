@@ -477,7 +477,10 @@ export class OutputLifecycle {
     // telemetry only (don't feed them back into depth). All zeros when no uncontended evidence exists.
     private static uncontendedMins(st: { samples: { rtt: number; unc: boolean; seg?: OffMainSegments }[] }): { minRtt: number; seg: OffMainSegments | null; pipeRtt: number } {
         let minRtt = Infinity
-        let consume = Infinity, finish = Infinity, enqueue = Infinity, doneMain = Infinity
+        let consume = Infinity,
+            finish = Infinity,
+            enqueue = Infinity,
+            doneMain = Infinity
         for (const s of st.samples) {
             if (!s.unc) continue
             if (s.rtt < minRtt) minRtt = s.rtt
@@ -606,11 +609,19 @@ export class OutputLifecycle {
         // optional capture stats (FS_CAP_STATS=1), printed once/sec: paints/forwards/completions,
         // drop + coalesce counters, delivery-gap spread, and per-frame hop timings from the worker
         const STATS = !!process.env.FS_CAP_STATS
-        let sPaints = 0, sDropBudget = 0, sDropInterval = 0, sForward = 0, sDone = 0, sReadback = 0, sRttSum = 0, sRttCount = 0
+        let sPaints = 0,
+            sDropBudget = 0,
+            sDropInterval = 0,
+            sForward = 0,
+            sDone = 0,
+            sReadback = 0,
+            sRttSum = 0,
+            sRttCount = 0
         // pending frames released by the full-pipe park watchdog (expected under saturation)
         let sParkExpired = 0
         // paints arriving within 5ms of the previous one (the compositor delivering in clumps)
-        let sBurstPaints = 0, lastPaintTime = 0
+        let sBurstPaints = 0,
+            lastPaintTime = 0
         // inter-arrival gaps between completed frames; the spread (not the mean) is what reads as jitter
         const sGaps: number[] = []
         let lastDoneTime = 0
@@ -632,7 +643,10 @@ export class OutputLifecycle {
                 const admitFps = Math.round(1000 / this.getOsrTargetInterval(id))
                 const ndiFps = OutputHelper.getOutput(id)?.captureOptions?.framerates?.ndi ?? "?"
                 // delivery-evenness stats from the inter-done gaps collected this window
-                let gapMean = 0, gapStd = 0, gapP95 = 0, gapBig = 0
+                let gapMean = 0,
+                    gapStd = 0,
+                    gapP95 = 0,
+                    gapBig = 0
                 if (sGaps.length) {
                     gapMean = sGaps.reduce((a, b) => a + b, 0) / sGaps.length
                     gapStd = Math.sqrt(sGaps.reduce((a, b) => a + (b - gapMean) * (b - gapMean), 0) / sGaps.length)
@@ -664,7 +678,9 @@ export class OutputLifecycle {
                 // begin-frame drive telemetry: invalidates issued vs paints received (invalidates=0 when
                 // natural paints flow and the drive is silent)
                 const sInvalidates = process.platform === "linux" ? OutputLifecycle.readOsrInvalidatesIssued(id) : 0
-                console.info(`[CAP-STATS ${id}] members=[${m.join(",")}] paints=${sPaints} invalidates=${sInvalidates} burst=${sBurstPaints} fwd=${sForward} done=${sDone} readback=${sReadback} dropBudget=${sDropBudget} dropInterval=${sDropInterval} parkExp=${sParkExpired} inflight=${offMainInFlight}/${this.depthFor(id)} globalInflight=${this.globalInFlight} depth=${this.depthFor(id)} depthTotal=${this.totalDepth()} minRtt=${pr.minRtt}ms pipeRtt=${pr.pipeRtt}ms ${segStr} renderers=${this.offMainRendererCount} rtt=${rtt}ms gap(mean=${Math.round(gapMean)} std=${Math.round(gapStd)} p95=${gapP95} >25ms=${gapBig}) pipeIdle=${Math.round(idleMs)}ms${tlStr} admit=${admitFps}fps sendCap=${sendCap}fps ndiFramerate=${ndiFps}`)
+                console.info(
+                    `[CAP-STATS ${id}] members=[${m.join(",")}] paints=${sPaints} invalidates=${sInvalidates} burst=${sBurstPaints} fwd=${sForward} done=${sDone} readback=${sReadback} dropBudget=${sDropBudget} dropInterval=${sDropInterval} parkExp=${sParkExpired} inflight=${offMainInFlight}/${this.depthFor(id)} globalInflight=${this.globalInFlight} depth=${this.depthFor(id)} depthTotal=${this.totalDepth()} minRtt=${pr.minRtt}ms pipeRtt=${pr.pipeRtt}ms ${segStr} renderers=${this.offMainRendererCount} rtt=${rtt}ms gap(mean=${Math.round(gapMean)} std=${Math.round(gapStd)} p95=${gapP95} >25ms=${gapBig}) pipeIdle=${Math.round(idleMs)}ms${tlStr} admit=${admitFps}fps sendCap=${sendCap}fps ndiFramerate=${ndiFps}`
+                )
                 sPaints = sDropBudget = sDropInterval = sParkExpired = sForward = sDone = sReadback = sRttSum = sRttCount = sBurstPaints = 0
                 sGaps.length = 0
                 sIdleMs = 0
@@ -693,9 +709,6 @@ export class OutputLifecycle {
             const framerate = output?.captureOptions?.framerates?.ndi || 30
             const ratio = height ? width / height : 16 / 9
             const transparent = output?.transparent === true
-            // NDI and OMT both encode YUV, so the readback converts on the GPU to UYVY (or UYVA when the
-            // output is transparent); a mixed output also gets a small BGRA GPU-downscale for server/stage
-            // in the same readback pass.
             const hasOmt = !!OmtSender.OMT[id]?.sender
             const omtFramerate = output?.captureOptions?.framerates?.omt || framerate
             const fmt = transparent ? 2 : 1
@@ -872,10 +885,6 @@ export class OutputLifecycle {
             // ask the addon to convert straight to NDI/SDI's UYVY/UYVA when a single such consumer is active
             const requestedFormat = CaptureHelper.Transmitter.getReadbackFormat(id, { width, height })
 
-            // off-main capture: when an NDI and/or OMT output's only other consumers are server/stage,
-            // the entire per-frame pipeline (readback + convert + downscale) runs in the worker — the
-            // main process only forwards the texture handle. With shared-render the renderer captures
-            // once and the readback fans out to every group member (`members` is [id] when sharing is off).
             const members = NdiSender.NDI[id]?.sender ? RenderGroups.members(id).filter((m) => m === id || (OutputHelper.getOutput(m) as any)?.renderGroupRenderer === id) : []
             const offMainIds = members.length ? members : OmtSender.OMT[id]?.sender ? [id] : []
             const groupInfo = offMainIds.length ? CaptureHelper.Transmitter.groupOffMainInfo(offMainIds) : null

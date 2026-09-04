@@ -30,8 +30,7 @@ export function setDataOMT(data: { id: string; framerate?: number | string; name
         CaptureHelper.updateFramerate(data.id)
     }
 
-    // the name and the quality (OMT's bandwidth/latency level) are fixed when a sender is created,
-    // so apply a change by recreating it — receivers reconnect on their own
+    // name and quality are fixed at sender creation, so apply a change by recreating it; receivers reconnect on their own
     const current = OmtSender.OMT[data.id]
     if (!current?.sender) return
 

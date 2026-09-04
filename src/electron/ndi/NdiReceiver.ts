@@ -28,8 +28,7 @@ export class NdiReceiver {
             const grandiose = await loadGrandiose()
             if (!grandiose) return null
 
-            // UYVY is half the bytes of RGBA and every one of them costs main-thread time in IPC; the
-            // renderer converts it on the GPU. Sources with alpha still arrive as RGBA.
+            // UYVY where the source allows it; the renderer converts on the GPU. Sources with alpha still arrive as RGBA.
             this.fourCCUyvy = grandiose.FOURCC_UYVY
             const config: any = { source, colorFormat: grandiose.COLOR_FORMAT_UYVY_RGBA, allowVideoFields: false }
             if (lowbandwidth) config.bandwidth = grandiose.BANDWIDTH_LOWEST
@@ -171,8 +170,7 @@ export class NdiReceiver {
                         this.sendBuffer(sourceId, rawFrame)
                         consecutiveErrors = 0
 
-                        // video() already blocks until the next frame, so pace on the source: waiting
-                        // after every frame pushes the next fetch past the frame after it
+                        // video() already blocks until the next frame, so pace on the source rather than a timer
                         await new Promise((resolve) => setImmediate(resolve))
                         continue
                     }
@@ -258,8 +256,7 @@ export class NdiReceiver {
         const time = Date.now()
         this.sendToOutputs.forEach((outputId) => OutputHelper.Send.sendToWindow(outputId, { channel: "RECEIVE_STREAM", data: { id, frame: packed, time } }, NDI))
 
-        // the app window only ever previews it (drawer card, output mirror), so it gets a small copy:
-        // full frames here cost the main thread more than the rest of this path combined
+        // the app window only ever previews it (drawer card, output mirror), so it gets a small copy
         toApp(NDI, { channel: "RECEIVE_STREAM", data: { id, frame: previewStreamFrame(packed, this.PREVIEW_MAX_WIDTH), time } })
     }
 

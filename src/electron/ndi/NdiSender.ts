@@ -64,8 +64,7 @@ export class NdiSender {
         return this.worker
     }
 
-    // OMT proxy messages (statusOmt/videoDoneOmt/createFailedOmt) are routed to OmtSender via this
-    // registered handler instead of a direct import (avoids an NdiSender<->OmtSender cycle)
+    // OMT proxy messages are routed to OmtSender through this handler rather than a direct import, avoiding a cycle
     static auxMessageHandler: ((msg: any) => void) | null = null
 
     private static onWorkerMessage(msg: any) {
@@ -170,8 +169,7 @@ export class NdiSender {
     // floor when not) — the worker paces each member's sender at ITS rate, never the renderer's.
     static captureFrameNDI(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number }) {
         const data = this.NDI[id]
-        // opts.omt: the output has an OMT sender in the shared worker, so the capture proceeds even
-        // without an NDI sender (OMT-only off-main output)
+        // opts.omt: an OMT sender in the shared worker, so the capture proceeds without an NDI sender
         if ((!data?.sender && !opts.omt) || !this.getWorker()) return false
         this.worker!.postMessage({ type: "captureFrame", id, source, opts })
         return true

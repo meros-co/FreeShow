@@ -57,9 +57,7 @@
         }
     }
 
-    // The preload keeps one listener per id, so instances must not share one: two components showing
-    // the same source (a drawer card and an output's preview, say) would collapse to a single listener
-    // and whichever unmounted first would silence the other.
+    // the preload keeps one listener per id, so two components showing the same source must not share one
     const receiverId = `${screen.id}#${++streamInstances}`
 
     receive(BLACKMAGIC, receiveBlackmagic, receiverId)

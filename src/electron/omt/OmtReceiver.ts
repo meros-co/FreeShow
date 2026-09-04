@@ -28,8 +28,7 @@ export class OmtReceiver {
 
             this.codecs = omt.Codec
 
-            // UYVY is half the bytes of BGRA and every one of them costs main-thread time in IPC;
-            // the renderer converts it on the GPU. Sources with alpha still arrive as BGRA.
+            // UYVY where the source allows it; the renderer converts on the GPU. Sources with alpha still arrive as BGRA.
             const flags = lowbandwidth ? omt.ReceiveFlags.Preview : omt.ReceiveFlags.None
             return new omt.Receiver(address, omt.FrameType.Video, omt.PreferredVideoFormat.UYVYorBGRA, flags)
         } catch (err) {
@@ -106,9 +105,8 @@ export class OmtReceiver {
                     consecutiveErrors = 0
                 }
 
-                // receive() already blocks until the next frame, so pace on the source rather than on a
-                // timer: sleeping after every frame pushed the next receive past the frame after it and
-                // cost real frames. Idle (no frame) still backs off, and thumbnails keep their slow rate.
+                // receive() already blocks until the next frame, so pace on the source rather than a timer.
+                // Idle (no frame) still backs off, and thumbnails keep their slow rate.
                 if (frame?.data && delayMs < this.THUMBNAIL_LOOP_DELAY_MS) await new Promise((resolve) => setImmediate(resolve))
                 else await new Promise((resolve) => setTimeout(resolve, delayMs))
             } catch (err: any) {
@@ -140,9 +138,7 @@ export class OmtReceiver {
         const time = Date.now()
         this.sendToOutputs.forEach((outputId) => OutputHelper.Send.sendToWindow(outputId, { channel: "RECEIVE_STREAM", data: { id, frame: packed, time } }, OMT))
 
-        // the app window only ever previews it (drawer card, output mirror), so it gets a small copy of
-        // every frame: full frames here saturated the main thread, but a downscaled one is cheap enough
-        // to keep the preview as smooth as the output
+        // the app window only ever previews it (drawer card, output mirror), so it gets a small copy of every frame
         toApp(OMT, { channel: "RECEIVE_STREAM", data: { id, frame: previewStreamFrame(packed, this.PREVIEW_MAX_WIDTH), time } })
     }
 

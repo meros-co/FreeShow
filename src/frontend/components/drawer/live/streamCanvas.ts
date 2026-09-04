@@ -1,8 +1,5 @@
-// Draws NDI/OMT stream frames into a canvas.
-//
-// Frames arrive as UYVY where the source allows it, which is half the bytes of RGBA and therefore half
-// the main-process IPC cost of delivering them. Converting is a per-pixel job, so it runs on the GPU
-// here; the CPU path covers RGBA/BGRA frames and machines without WebGL.
+// Draws NDI/OMT stream frames into a canvas: UYVY frames convert on the GPU, with a CPU path for
+// RGBA/BGRA frames and machines without WebGL.
 
 export type StreamFrame = { xres: number; yres: number; data: Uint8Array | ArrayBuffer; format?: "uyvy" | "rgba" | "bgra" }
 
@@ -39,8 +36,7 @@ function buildProgram(context: WebGLRenderingContext) {
     return program
 }
 
-// A canvas can only ever have one kind of context, so prove the GPU path works on a throwaway canvas
-// before committing a real one to it.
+// A canvas can only ever have one kind of context, so prove the GPU path on a throwaway canvas first.
 let gpuConvertSupported: boolean | null = null
 function canConvertOnGPU() {
     if (gpuConvertSupported !== null) return gpuConvertSupported
