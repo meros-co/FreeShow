@@ -107,7 +107,11 @@ export class OmtReceiver {
                     consecutiveErrors = 0
                 }
 
-                await new Promise((resolve) => setTimeout(resolve, delayMs))
+                // receive() already blocks until the next frame, so pace on the source rather than on a
+                // timer: sleeping after every frame pushed the next receive past the frame after it and
+                // cost real frames. Idle (no frame) still backs off, and thumbnails keep their slow rate.
+                if (frame?.data && delayMs < this.THUMBNAIL_LOOP_DELAY_MS) await new Promise((resolve) => setImmediate(resolve))
+                else await new Promise((resolve) => setTimeout(resolve, delayMs))
             } catch (err: any) {
                 consecutiveErrors++
                 this.destroyReceiver(sourceId)
@@ -148,8 +152,6 @@ export class OmtReceiver {
     // nearest-neighbour shrink for the app window's preview: it draws this a few hundred pixels wide, and
     // every byte sent costs main-thread time in IPC
     private static PREVIEW_MAX_WIDTH = 480
-    private static PREVIEW_INTERVAL_MS = 100
-    private static lastPreviewSent: { [id: string]: number } = {}
 
     private static previewFrame(full: PackedFrame): PackedFrame {
         const scale = Math.max(1, Math.ceil(full.xres / this.PREVIEW_MAX_WIDTH))
@@ -203,10 +205,9 @@ export class OmtReceiver {
         const time = Date.now()
         this.sendToOutputs.forEach((outputId) => OutputHelper.Send.sendToWindow(outputId, { channel: "RECEIVE_STREAM", data: { id, frame: packed, time } }, OMT))
 
-        // the app window only ever previews it (drawer card, output mirror), so send a small copy at a
-        // relaxed rate — full frames here saturated the main thread and stalled the whole UI
-        if (time - (this.lastPreviewSent[id] || 0) < this.PREVIEW_INTERVAL_MS) return
-        this.lastPreviewSent[id] = time
+        // the app window only ever previews it (drawer card, output mirror), so it gets a small copy of
+        // every frame: full frames here saturated the main thread, but a downscaled one is cheap enough
+        // to keep the preview as smooth as the output
         toApp(OMT, { channel: "RECEIVE_STREAM", data: { id, frame: this.previewFrame(packed), time } })
     }
 
@@ -235,7 +236,6 @@ export class OmtReceiver {
                 setTimeout(() => {
                     this.destroyReceiver(data.id)
                     delete this.OMT_RECEIVERS[data.id]
-                    delete this.lastPreviewSent[data.id]
                 }, 100)
             }
             return
@@ -247,7 +247,6 @@ export class OmtReceiver {
         setTimeout(() => {
             Object.keys(this.allActiveReceivers).forEach((id) => this.destroyReceiver(id))
             this.OMT_RECEIVERS = {}
-            this.lastPreviewSent = {}
         }, 100)
     }
 }
