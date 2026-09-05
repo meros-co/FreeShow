@@ -383,9 +383,16 @@ type OmtLoop = {
 }
 
 class Omt {
-    static outputs: string[] = []
+    // Reference count per output: an output's two crossfade layers each mount a stream component for
+    // the same source and output, so a plain list would let the first one to unmount stop a live
+    // stream that the other still shows.
+    private static outputRefs: { [outputId: string]: number } = {}
     static codecs: any = null
     private static loops: { [sourceId: string]: OmtLoop } = {}
+
+    private static get outputs() {
+        return Object.keys(this.outputRefs)
+    }
 
     private static readonly RECEIVE_TIMEOUT_MS = 50
     private static readonly FULL_LOOP_DELAY_MS = 16 // ~60fps ceiling
@@ -421,19 +428,24 @@ class Omt {
         return addresses.map((address) => ({ name: address, urlAddress: address }))
     }
 
-    static thumbnail({ source }: { source: any }) {
-        if (this.loops[source.id]) return
+    static async thumbnail({ source }: { source: any }) {
+        const existing = this.loops[source.id]
+        if (existing) {
+            if (!existing.stopped) return
+            await this.stopLoop(existing)
+        }
         this.startLoop(source, true, this.THUMBNAIL_LOOP_DELAY_MS)
     }
 
     static async capture({ source, outputId }: { source: any; outputId: string }) {
-        if (!this.outputs.includes(outputId)) this.outputs.push(outputId)
+        this.outputRefs[outputId] = (this.outputRefs[outputId] || 0) + 1
 
-        // a thumbnail loop holds a low-bandwidth instance: end it, and wait until it has released
-        // that instance, before starting the full-quality one
+        // a running full-quality loop already serves this source; a thumbnail loop holds a
+        // low-bandwidth instance and a stopping loop still holds its instance, so either is ended and
+        // awaited before the full-quality one starts
         const existing = this.loops[source.id]
         if (existing) {
-            if (!existing.lowbandwidth) return
+            if (!existing.lowbandwidth && !existing.stopped) return
             await this.stopLoop(existing)
         }
 
@@ -535,9 +547,10 @@ class Omt {
     static stop(data: { id: string; outputId?: string } | null = null): Promise<void> {
         if (data?.id) {
             if (data.outputId) {
-                const index = this.outputs.indexOf(data.outputId)
-                if (index >= 0) this.outputs.splice(index, 1)
-            } else this.outputs = []
+                const refs = (this.outputRefs[data.outputId] || 0) - 1
+                if (refs > 0) this.outputRefs[data.outputId] = refs
+                else delete this.outputRefs[data.outputId]
+            } else this.outputRefs = {}
 
             const loop = this.loops[data.id]
             if (!this.outputs.length && loop) return this.stopLoop(loop)
