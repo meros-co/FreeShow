@@ -428,8 +428,11 @@ async function createOmtSender(id: string, name: string, quality?: number | stri
         }
 
         OMTS[id].sender = sender
-        OMTS[id].sendFrame = (frame: any) => sender.send(frame)
-        OMTS[id].sendAudio = (frame: any) => sender.send(frame)
+        // the encode runs on the thread pool, so this worker stays free for the readback pipeline and
+        // several senders encode in parallel; the sync send is the fallback for an older addon
+        const sendAsync = typeof sender.sendAsync === "function"
+        OMTS[id].sendFrame = sendAsync ? (frame: any) => sender.sendAsync(frame) : (frame: any) => sender.send(frame)
+        OMTS[id].sendAudio = sendAsync ? (frame: any) => sender.sendAsync(frame) : (frame: any) => sender.send(frame)
         OMTS[id].tsKey = "timestamp"
     } catch (err) {
         console.error("Could not create OMT sender:", err)
