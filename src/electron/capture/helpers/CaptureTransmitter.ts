@@ -10,6 +10,7 @@ import { getConnections, getStageStreamSubscriberIds, toServer, toStageStreamSub
 import { RtmpStreamer } from "../../streaming/RtmpStreamer"
 import { WebRtcHost } from "../../streaming/WebRtcHost"
 import { CaptureHelper } from "../CaptureHelper"
+import { PreviewStream } from "../PreviewStream"
 
 export type Channel = {
     key: string
@@ -135,11 +136,13 @@ export class CaptureTransmitter {
             if (heavy.some((key) => key !== "server" && key !== "stage")) return { eligible: false, needsScaled: false }
             if (heavy.length) needsScaled = true
         }
-        return { eligible: true, needsScaled: needsScaled && this.previewViewersConnected() }
+        return { eligible: true, needsScaled: needsScaled && (this.previewViewersConnected() || PreviewStream.hasSubscribers()) }
     }
 
     // Dispatches downscaled frame from worker to server/stage channels
     static receiveScaledFrame(memberIds: string[], buffer: ArrayBuffer, byteOffset: number, byteLength: number, size: Size) {
+        // the main window's output previews draw this same frame (relayed, no pixel work here)
+        PreviewStream.push(memberIds, buffer, byteOffset, byteLength, size)
         if (!this.previewViewersConnected()) return
         const image = nativeImage.createFromBitmap(Buffer.from(buffer, byteOffset, byteLength), size)
         if (image.isEmpty()) return

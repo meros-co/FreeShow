@@ -62,6 +62,10 @@ contextBridge.exposeInMainWorld("api", {
 // One port per window, handed over the first time the receiving process has a frame for it. It is
 // forwarded straight into the page instead of being read here: dispatching from the preload copies
 // every frame across the contextBridge again, which at 4K made frames arrive too old to be drawn.
+ipcRenderer.on("PREVIEW_PORT", (event) => {
+    window.postMessage({ type: "PREVIEW_PORT" }, "*", [event.ports[0]])
+})
+
 ipcRenderer.on("STREAM_PORT", (event) => {
     if (!event.ports?.length) return
     window.postMessage({ type: "STREAM_PORT" }, "*", [event.ports[0]])

@@ -11,6 +11,7 @@ import { OutputSend } from "./helpers/OutputSend"
 import { OutputValues } from "./helpers/OutputValues"
 import { OutputVisibility } from "./helpers/OutputVisibility"
 import { RenderGroups } from "./helpers/RenderGroups"
+import { PreviewStream } from "../capture/PreviewStream"
 import type { Output as OutputData } from "./Output"
 
 export class OutputHelper {
@@ -32,6 +33,8 @@ export class OutputHelper {
             TO_FRONT: (data: string) => OutputHelper.Bounds.moveToFront(data),
 
             REQUEST_PREVIEW: (data: { id: string; previewId: string }) => CaptureHelper.Transmitter.requestPreview(data),
+            PREVIEW_SUBSCRIBE: (data: { id: string }) => PreviewStream.subscribe(data.id),
+            PREVIEW_UNSUBSCRIBE: (data: { id: string }) => PreviewStream.unsubscribe(data.id),
             CAPTURE: (data: { id: string; captures: { [key: string]: boolean } }) => CaptureHelper.Lifecycle.startCapture(data.id, data.captures),
 
             IDENTIFY_SCREENS: (data: { bounds: Rectangle }[]) => OutputHelper.Identify.identifyScreens(data),
