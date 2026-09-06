@@ -116,6 +116,14 @@ export class CaptureTransmitter {
         return { dstW, dstH }
     }
 
+    // Someone is actually watching a web output stream or a stage "current output" mirror. Without a
+    // viewer the server/stage channels stay registered (the servers are enabled) but no preview frame is
+    // produced, shipped or converted for them: that work only exists for a connected viewer.
+    static previewViewersConnected(): boolean {
+        if (getConnections("OUTPUT_STREAM") > 0) return true
+        return getConnections("STAGE") > 0 && getStageStreamSubscriberIds().length > 0
+    }
+
     // Checks if all members of a group only use NDI, server, or stage
     static groupOffMainInfo(memberIds: string[]): { eligible: boolean; needsScaled: boolean } {
         let needsScaled = false
@@ -127,11 +135,12 @@ export class CaptureTransmitter {
             if (heavy.some((key) => key !== "server" && key !== "stage")) return { eligible: false, needsScaled: false }
             if (heavy.length) needsScaled = true
         }
-        return { eligible: true, needsScaled }
+        return { eligible: true, needsScaled: needsScaled && this.previewViewersConnected() }
     }
 
     // Dispatches downscaled frame from worker to server/stage channels
     static receiveScaledFrame(memberIds: string[], buffer: ArrayBuffer, byteOffset: number, byteLength: number, size: Size) {
+        if (!this.previewViewersConnected()) return
         const image = nativeImage.createFromBitmap(Buffer.from(buffer, byteOffset, byteLength), size)
         if (image.isEmpty()) return
         for (const id of memberIds) {
@@ -455,10 +464,12 @@ export class CaptureTransmitter {
             case "blackmagic":
                 this.sendBufferToBlackmagic(captureId, image)
                 break
-            case "server":
+            case "server": {
+                if (getConnections("OUTPUT_STREAM") === 0) break // nobody watching: no resize, no convert, no send
                 const scale = this.getServerScale()
                 this.sendBufferToServer(captureId, image.resize({ width: size.width * scale, height: size.height * scale, quality: "good" }))
                 break
+            }
             case "stage":
                 this.sendBufferToMain(captureId, image)
                 break

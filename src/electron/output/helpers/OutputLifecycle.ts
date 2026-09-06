@@ -465,6 +465,12 @@ export class OutputLifecycle {
         return this.uncontendedMins(st)
     }
 
+    // per-output paint bodies (the "paint" listener above only times and dispatches)
+    private static sharedPaintImpls = new Map<string, (event: any, image: Electron.NativeImage) => void>()
+    private static onSharedTexturePaint(id: string, event: any, image: Electron.NativeImage) {
+        this.sharedPaintImpls.get(id)?.(event, image)
+    }
+
     private static noteFrameSize(id: string, px: number) {
         const st = this.offMain.get(id)
         if (!st || st.px === px) return
@@ -779,7 +785,21 @@ export class OutputLifecycle {
         let cpuFallback = false
         let lastCpuImage: Electron.NativeImage | null = null
 
+        NdiSender.startMainDiag()
         window.webContents.on("paint", (event: any, _dirty: unknown, image: Electron.NativeImage) => {
+            const tPaint = STATS ? performance.now() : 0
+            try {
+                OutputLifecycle.onSharedTexturePaint(id, event, image)
+            } finally {
+                if (tPaint) {
+                    const dt = performance.now() - tPaint
+                    NdiSender.mainDiag.paintMs += dt
+                    NdiSender.mainDiag.paintN++
+                    if (dt > NdiSender.mainDiag.paintMax) NdiSender.mainDiag.paintMax = dt
+                }
+            }
+        })
+        const onPaintImpl = (event: any, image: Electron.NativeImage) => {
             OutputLifecycle.noteOsrPaint(id)
             const tex = event?.texture
             const info = tex?.textureInfo
@@ -841,7 +861,8 @@ export class OutputLifecycle {
                     releaseTex(tex)
                     inFlight--
                 })
-        })
+        }
+        OutputLifecycle.sharedPaintImpls.set(id, onPaintImpl)
 
         this.startOsrSendTimer(window, id, () => {
             if (lastRaw) CaptureHelper.Transmitter.transmitFrame(id, null, undefined, lastRaw)
@@ -870,6 +891,7 @@ export class OutputLifecycle {
             this.offMain.delete(id)
             this.offMainRendererCount = Math.max(0, this.offMainRendererCount - 1)
             delete NdiSender.captureDoneCallbacks[id]
+            OutputLifecycle.sharedPaintImpls.delete(id)
             delete NdiSender.releaseTextureCallbacks[id]
             heldTextures.forEach((t) => releaseTex(t))
             heldTextures.clear()

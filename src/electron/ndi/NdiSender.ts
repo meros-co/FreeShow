@@ -52,6 +52,24 @@ export class NdiSender {
     static auxMessageHandler: ((msg: any) => void) | null = null
 
     private static onWorkerMessage(msg: any) {
+        const t0 = process.env.FS_CAP_STATS ? performance.now() : 0
+        try {
+            this.onWorkerMessageBody(msg)
+        } finally {
+            if (t0) {
+                const dt = performance.now() - t0
+                this.mainDiag.msgMs += dt
+                this.mainDiag.msgN++
+                if (dt > this.mainDiag.msgMax) this.mainDiag.msgMax = dt
+                const t = (this.mainDiag.byType[msg?.type || "?"] ||= { ms: 0, n: 0, max: 0 })
+                t.ms += dt
+                t.n++
+                if (dt > t.max) t.max = dt
+            }
+        }
+    }
+
+    private static onWorkerMessageBody(msg: any) {
         if (!msg?.type) return
         if (String(msg.type).endsWith("Omt")) {
             this.auxMessageHandler?.(msg)
@@ -134,6 +152,31 @@ export class NdiSender {
             arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer
         }
         this.worker.postMessage({ type: "video", id, buffer: arrayBuffer, byteOffset: 0, byteLength: arrayBuffer.byteLength, opts: { size, ratio, framerate, transparent, format } }, [arrayBuffer])
+    }
+
+    // FS_CAP_STATS: how congested the MAIN JS thread is. lag = how late a 5ms timer fires (0 = idle);
+    // paint/msg = synchronous time spent in the OSR paint handler and in worker-message handling per second.
+    static mainDiag = { lagSum: 0, lagMax: 0, lagN: 0, paintMs: 0, paintN: 0, paintMax: 0, msgMs: 0, msgN: 0, msgMax: 0, lastTick: 0, started: false, byType: {} as { [type: string]: { ms: number; n: number; max: number } } }
+    static startMainDiag() {
+        if (this.mainDiag.started || !process.env.FS_CAP_STATS) return
+        this.mainDiag.started = true
+        const d = this.mainDiag
+        d.lastTick = performance.now()
+        setInterval(() => {
+            const now = performance.now()
+            const lag = Math.max(0, now - d.lastTick - 5)
+            d.lastTick = now
+            d.lagSum += lag
+            d.lagN++
+            if (lag > d.lagMax) d.lagMax = lag
+        }, 5)
+        setInterval(() => {
+            if (!d.lagN) return
+            const types = Object.entries(d.byType).map(([k, v]) => `${k}:n${v.n}/${v.ms.toFixed(0)}ms/max${v.max.toFixed(1)}`).join(" ")
+            console.info(`[MAIN-LOOP] lag(mean=${(d.lagSum / d.lagN).toFixed(2)}ms max=${d.lagMax.toFixed(1)}ms) paint(n=${d.paintN} ${d.paintMs.toFixed(1)}ms/s max=${d.paintMax.toFixed(1)}ms) workerMsg(n=${d.msgN} ${d.msgMs.toFixed(1)}ms/s max=${d.msgMax.toFixed(1)}ms) ${types}`)
+            d.lagSum = d.lagMax = d.lagN = d.paintMs = d.paintN = d.paintMax = d.msgMs = d.msgN = d.msgMax = 0
+            d.byType = {}
+        }, 1000)
     }
 
     static captureDoneCallbacks: { [id: string]: (seq: number, tl?: { recv: number; cS: number; cE: number; fS: number; fE: number; enq: number } | null) => void } = {}

@@ -73,6 +73,21 @@ type Sender = {
     sendRejected?: number // sends the library accepted but did not put on the wire (OMT: encode failure)
     rejectLogged?: boolean
 }
+// FS_CAP_STATS: how congested this worker's JS thread is. Loop lag = how late a 5ms timer fires
+// (0 = idle loop); copyMs/fanMs = synchronous time spent copying readbacks and fanning out frames.
+const loopDiag = { lagSum: 0, lagMax: 0, lagN: 0, copyMs: 0, copyN: 0, fanMs: 0, lastTick: 0 }
+if (process.env.FS_CAP_STATS) {
+    loopDiag.lastTick = performance.now()
+    setInterval(() => {
+        const now = performance.now()
+        const lag = Math.max(0, now - loopDiag.lastTick - 5)
+        loopDiag.lastTick = now
+        loopDiag.lagSum += lag
+        loopDiag.lagN++
+        if (lag > loopDiag.lagMax) loopDiag.lagMax = lag
+    }, 5)
+}
+
 const NDI: { [id: string]: Sender } = {}
 // OMT senders live in the same worker, so an NDI+OMT output shares one readback per frame
 const OMTS: { [id: string]: Sender } = {}
@@ -87,6 +102,10 @@ if (process.env.FS_CAP_STATS) {
         lastCpu = nowCpu
         lastCpuAt = nowAt
         const rb = loadOsrCapture()?._readbackBackend?.() ?? "?"
+        if (loopDiag.lagN) {
+            console.info(`[WORKER-LOOP] lag(mean=${(loopDiag.lagSum / loopDiag.lagN).toFixed(2)}ms max=${loopDiag.lagMax.toFixed(1)}ms) copy(n=${loopDiag.copyN} ${loopDiag.copyN ? (loopDiag.copyMs / loopDiag.copyN).toFixed(2) : "0"}ms each) fanOut=${loopDiag.fanMs.toFixed(1)}ms/s cpuCores=${cpuCores.toFixed(2)}`)
+            loopDiag.lagSum = loopDiag.lagMax = loopDiag.lagN = loopDiag.copyMs = loopDiag.copyN = loopDiag.fanMs = 0
+        }
         const statSenders: [string, Sender][] = [...Object.entries(NDI), ...Object.entries(OMTS).map(([id, s]): [string, Sender] => [`omt#${id}`, s])]
         for (const [id, s] of statSenders) {
             if (!s?.sender) continue
@@ -683,6 +702,11 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
         textureReleased = true
         port.postMessage({ type: "releaseTexture", id, seq })
     }
+    // one refcounted buffer per frame: the addon writes the readback straight into it and every member
+    // (NDI and OMT alike) queues that same buffer, so the frame is never copied on this thread
+    const frameBytes = format === 1 ? size.width * size.height * 2 : format === 2 ? size.width * size.height * 3 : size.width * size.height * 4
+    const framePbuf = twoPhase ? acquirePacerBuf(id, frameBytes) : null
+    let framePbufQueued = false
     try {
         let buffer: Buffer
         let scaled: Buffer | undefined
@@ -710,7 +734,7 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             if (tl) tl.cE = Date.now()
             releaseTexture()
             if (tl) tl.fS = Date.now()
-            const res = await osr.readbackFinish(rbKey, size.width, size.height, format, wantScaled ? dstW : 0, wantScaled ? dstH : 0)
+            const res = await osr.readbackFinish(rbKey, size.width, size.height, format, wantScaled ? dstW : 0, wantScaled ? dstH : 0, framePbuf!.buf)
             if (tl) tl.fE = Date.now()
             if (wantScaled && res && res.main) {
                 buffer = res.main
@@ -739,8 +763,17 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
                 ndiFormat = useAlpha ? 2 : 1
             }
             const fourCC: number = ndiFormat === 2 ? grandiose.FOURCC_UYVA : grandiose.FOURCC_UYVY
-            const pbuf = acquirePacerBuf(id, ndiBuffer.length)
-            ndiBuffer.copy(pbuf.buf, 0, 0, ndiBuffer.length)
+            let pbuf: PacerBuf
+            if (framePbuf && ndiBuffer === framePbuf.buf) {
+                pbuf = framePbuf // the addon filled the shared frame buffer: queue it as is
+                framePbufQueued = true
+            } else {
+                const tCopyN = performance.now()
+                pbuf = acquirePacerBuf(id, ndiBuffer.length)
+                ndiBuffer.copy(pbuf.buf, 0, 0, ndiBuffer.length)
+                loopDiag.copyMs += performance.now() - tCopyN
+                loopDiag.copyN++
+            }
             const frame = {
                 timecode: (timeStart + process.hrtime.bigint()) / TIMECODE_DIVISOR,
                 xres: size.width,
@@ -787,8 +820,17 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
         if (hasOmt) {
             const omt = await loadOMT()
             if (omt) {
-                const obuf = acquirePacerBuf(`omt#${id}`, buffer.length)
-                buffer.copy(obuf.buf, 0, 0, buffer.length)
+                const tCopy = performance.now()
+                let obuf: PacerBuf
+                if (framePbuf && buffer === framePbuf.buf) {
+                    obuf = framePbuf // shared with the NDI members; refcounts keep it alive until all sent
+                    framePbufQueued = true
+                } else {
+                    obuf = acquirePacerBuf(`omt#${id}`, buffer.length)
+                    buffer.copy(obuf.buf, 0, 0, buffer.length)
+                    loopDiag.copyMs += performance.now() - tCopy
+                    loopDiag.copyN++
+                }
                 const baseFrame = makeOmtVideoFrame(omt, obuf.buf, size, ratio, Math.max(1, opts.omtFramerate || framerate), opts.transparent !== false, format)
                 for (const m of omtMembers) {
                     const od = OMTS[m]!
@@ -814,12 +856,18 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
                     od.lastPace = { frame: oFrame, pbuf: obuf }
                     startPacer(OMTS, m)
                 }
+                loopDiag.fanMs += performance.now() - tCopy
             }
         }
         if (tl) tl.enq = Date.now() // pacer enqueue complete (memcpy + fan-out done) — nonzero = clean path
     } catch (err) {
         console.error("Worker readback error:", err)
     } finally {
+        // nobody queued the shared frame buffer (error, or no member took it): return it to the pool
+        if (framePbuf && !framePbufQueued && framePbuf.refs === 0) {
+            const pool = pacerPools[framePbuf.owner]
+            if (pool && !pool.includes(framePbuf.buf)) pool.push(framePbuf.buf)
+        }
         releaseTexture() // safety: ensure the texture is released even on error
         releaseReadbackSlot(id, slot)
         // capture fully done -> this pipeline slot frees (main may forward another frame for this output)
