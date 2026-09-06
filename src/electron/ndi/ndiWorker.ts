@@ -665,6 +665,12 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
         }
         senderData.sendingVideo = false
         releasePacerRef(entry.pbuf)
+        // work-conserving: a tick that found this sender busy left its frame waiting; when the encode
+        // outlasts the tick interval, send that frame now rather than idling until the next tick
+        if (senderData.paceQueue?.length && senderData.paceNextDue !== undefined && Date.now() >= senderData.paceNextDue - (senderData.paceInterval || 0)) {
+            const next = senderData.paceQueue.shift()!
+            void paceSend(reg, id, next, true)
+        }
     }
 }
 
