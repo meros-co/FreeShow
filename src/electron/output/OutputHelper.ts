@@ -33,8 +33,9 @@ export class OutputHelper {
             TO_FRONT: (data: string) => OutputHelper.Bounds.moveToFront(data),
 
             REQUEST_PREVIEW: (data: { id: string; previewId: string }) => CaptureHelper.Transmitter.requestPreview(data),
-            PREVIEW_SUBSCRIBE: (data: { id: string }) => PreviewStream.subscribe(data.id),
-            PREVIEW_UNSUBSCRIBE: (data: { id: string }) => PreviewStream.unsubscribe(data.id),
+            PREVIEW_SUBSCRIBE: (data: { id: string; subscriber?: string; width?: number }) => PreviewStream.subscribe(data.id, data.subscriber, data.width),
+            PREVIEW_UNSUBSCRIBE: (data: { id: string; subscriber?: string }) => PreviewStream.unsubscribe(data.id, data.subscriber),
+            PREVIEW_SIZE: (data: { id: string; subscriber: string; width: number }) => PreviewStream.setWidth(data.id, data.subscriber, data.width),
             CAPTURE: (data: { id: string; captures: { [key: string]: boolean } }) => CaptureHelper.Lifecycle.startCapture(data.id, data.captures),
 
             IDENTIFY_SCREENS: (data: { bounds: Rectangle }[]) => OutputHelper.Identify.identifyScreens(data),

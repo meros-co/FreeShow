@@ -110,9 +110,15 @@ export class CaptureTransmitter {
         return heavy
     }
 
-    // Downscale target for server/stage previews
-    static getScaledTarget(size: Size): { dstW: number; dstH: number } {
-        const dstW = Math.min(size.width, this.HEAVY_IMAGE_MAX_WIDTH)
+    // Downscale target for server/stage viewers and the main window's previews. Web/stage viewers get the
+    // full preview width; when only previews are subscribed, the frame is no wider than the widest preview
+    // actually drawn (even width, since the packed formats pair pixels), so the relay costs what it must.
+    static getScaledTarget(size: Size, memberIds: string[] = []): { dstW: number; dstH: number } {
+        let dstW = Math.min(size.width, this.HEAVY_IMAGE_MAX_WIDTH)
+        if (!this.previewViewersConnected()) {
+            const wanted = PreviewStream.requestedWidth(memberIds)
+            if (wanted > 0) dstW = Math.min(dstW, Math.max(2, wanted + (wanted % 2)))
+        }
         const dstH = Math.max(1, Math.round((dstW * size.height) / size.width))
         return { dstW, dstH }
     }

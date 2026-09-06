@@ -33,6 +33,10 @@
     const renderer = new StreamCanvasRenderer()
     let subscribedId = ""
     let unlisten: (() => void) | null = null
+    // this preview instance, so main can size the frame to the widest preview actually drawn
+    const subscriber = "p" + Math.random().toString(36).slice(2, 10)
+    $: drawnWidth = Math.round(width * (window.devicePixelRatio || 1))
+    $: if (subscribedId && drawnWidth) send(OUTPUT, ["PREVIEW_SIZE"], { id: subscribedId, subscriber, width: drawnWidth })
 
     // The preview must never be blank. Capture frames arrive only once the output's capture is running
     // (and only on the off-main capture path), so the mirrored output stays on screen until frames flow,
@@ -70,14 +74,14 @@
     function subscribePreview(id: string) {
         if (id === subscribedId) return
         if (subscribedId) {
-            send(OUTPUT, ["PREVIEW_UNSUBSCRIBE"], { id: subscribedId })
+            send(OUTPUT, ["PREVIEW_UNSUBSCRIBE"], { id: subscribedId, subscriber })
             unlisten?.()
             unlisten = null
         }
         subscribedId = id
         resetLive()
         if (!id) return
-        send(OUTPUT, ["PREVIEW_SUBSCRIBE"], { id })
+        send(OUTPUT, ["PREVIEW_SUBSCRIBE"], { id, subscriber, width: drawnWidth })
         unlisten = onPreviewFrame(id, (frame) => {
             noteFrame()
             if (previewCanvas) renderer.draw(previewCanvas, { xres: frame.width, yres: frame.height, data: frame.data, format: "bgra" })

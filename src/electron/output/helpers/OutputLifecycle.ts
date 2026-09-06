@@ -685,7 +685,7 @@ export class OutputLifecycle {
             const omtFramerate = omtFramerates[id] || framerate
             const groupInfo = CaptureHelper.Transmitter.groupOffMainInfo(members)
             const mixed = !!groupInfo && groupInfo.eligible && groupInfo.needsScaled && typeof addon.readbackConsume === "function"
-            const scaled = mixed ? CaptureHelper.Transmitter.getScaledTarget({ width, height }) : null
+            const scaled = mixed ? CaptureHelper.Transmitter.getScaledTarget({ width, height }, members) : null
             // The render is the largest member's size. Each member sends at its own size and format:
             // full-size members in the main format take the main readback; the others get a target of
             // their own (downscale + convert in the same GPU pass; CPU-derived where the addon can't).
