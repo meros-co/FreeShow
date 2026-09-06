@@ -157,10 +157,10 @@ export class OutputLifecycle {
         if (output.blackmagic) initializeSender(output, outputWindow, id)
     }
 
-    // only NDI capture outputs share a render; blackmagic/webrtc/rtmp need dedicated capture,
-    // and displayed (non-OSR) outputs need their own window
+    // NDI and OMT capture outputs share a render (one render per content, fanned out to every sender);
+    // blackmagic/webrtc/rtmp need dedicated capture, and displayed (non-OSR) outputs need their own window
     private static canShareRender(output: Output): boolean {
-        return !!output.ndi && !output.omt && !output.blackmagic && !output.webrtcData?.streaming && !output.rtmpData?.streaming && this.isOsrOutput(output)
+        return (!!output.ndi || !!output.omt) && !output.blackmagic && !output.webrtcData?.streaming && !output.rtmpData?.streaming && this.isOsrOutput(output)
     }
 
     private static async createFollowerOutput(id: string, output: Output, rendererId: string, rendererWindow: BrowserWindow) {
@@ -169,12 +169,16 @@ export class OutputLifecycle {
         this.pendingCaptureStart[id] = setTimeout(() => {
             delete this.pendingCaptureStart[id]
             if (!CaptureHelper.Lifecycle || !OutputHelper.getOutput(id)) return
-            CaptureHelper.Lifecycle.startCapture(id, { ndi: output.ndi || false })
+            CaptureHelper.Lifecycle.startCapture(id, { ndi: output.ndi || false, omt: output.omt || false })
         }, 1200)
 
         if (output.ndi) {
             await NdiSender.createSenderNDI(id, NdiSender.initNameNDI(output.ndiData?.name, output.name), output.ndiData?.groups)
             if (output.ndiData) setDataNDI({ id, ...output.ndiData })
+        }
+        if (output.omt) {
+            await OmtSender.createSenderOMT(id, OmtSender.initNameOMT(output.omtData?.name, output.name), output.omtData?.quality)
+            if (output.omtData) setDataOMT({ id, ...output.omtData })
         }
     }
 
@@ -255,6 +259,11 @@ export class OutputLifecycle {
             options.width! += 1
             options.height! += 1
         }
+    }
+
+    // the outputs drawn by this window: the output itself plus the followers of its render group
+    static groupMembers(id: string): string[] {
+        return RenderGroups.members(id).filter((m) => m === id || (OutputHelper.getOutput(m) as any)?.renderGroupRenderer === id)
     }
 
     private static isOsrOutput(output: { ndi?: boolean; omt?: boolean; webrtc?: boolean; rtmp?: boolean; blackmagic?: boolean }): boolean {
@@ -641,18 +650,22 @@ export class OutputLifecycle {
             const framerate = output?.captureOptions?.framerates?.ndi || 30
             const ratio = height ? width / height : 16 / 9
             const transparent = output?.transparent === true
-            const hasOmt = !!OmtSender.OMT[id]?.sender
-            const omtFramerate = output?.captureOptions?.framerates?.omt || framerate
             const fmt = transparent ? 2 : 1
-            const members = NdiSender.NDI[id]?.sender ? RenderGroups.members(id).filter((m) => m === id || (OutputHelper.getOutput(m) as any)?.renderGroupRenderer === id) : []
+            // every member of this render (the renderer itself plus its followers) gets this one readback,
+            // whichever protocol each one sends on
+            const members = OutputLifecycle.groupMembers(id)
             const memberFramerates: { [m: string]: number } = {}
+            const omtMembers = members.filter((m) => !!OmtSender.OMT[m]?.sender)
+            const omtFramerates: { [m: string]: number } = {}
             for (const m of members) memberFramerates[m] = OutputHelper.getOutput(m)?.captureOptions?.framerates?.ndi || framerate
-            const groupIds = members.length ? members : hasOmt ? [id] : []
-            const groupInfo = groupIds.length ? CaptureHelper.Transmitter.groupOffMainInfo(groupIds) : null
+            for (const m of omtMembers) omtFramerates[m] = OutputHelper.getOutput(m)?.captureOptions?.framerates?.omt || framerate
+            const hasOmt = omtMembers.length > 0
+            const omtFramerate = omtFramerates[id] || framerate
+            const groupInfo = CaptureHelper.Transmitter.groupOffMainInfo(members)
             const mixed = !!groupInfo && groupInfo.eligible && groupInfo.needsScaled && typeof addon.readbackConsume === "function"
             const scaled = mixed ? CaptureHelper.Transmitter.getScaledTarget({ width, height }) : null
             const seq = ++offMainSeq
-            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: fmt, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate })) {
+            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: fmt, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates })) {
                 forwardAt.set(seq, { t: Date.now(), unc: OutputLifecycle.globalInFlight === 0, px: width * height })
                 OutputLifecycle.globalInFlight++
                 offMainInFlight++
@@ -792,8 +805,8 @@ export class OutputLifecycle {
             const source = process.platform === "linux" ? { planes: info.planes, modifier: info.modifier } : info.sharedTextureHandle
             const requestedFormat = CaptureHelper.Transmitter.getReadbackFormat(id, { width, height })
 
-            const members = NdiSender.NDI[id]?.sender ? RenderGroups.members(id).filter((m) => m === id || (OutputHelper.getOutput(m) as any)?.renderGroupRenderer === id) : []
-            const offMainIds = members.length ? members : OmtSender.OMT[id]?.sender ? [id] : []
+            const members = OutputLifecycle.groupMembers(id)
+            const offMainIds = members.filter((m) => !!NdiSender.NDI[m]?.sender || !!OmtSender.OMT[m]?.sender)
             const groupInfo = offMainIds.length ? CaptureHelper.Transmitter.groupOffMainInfo(offMainIds) : null
             const hasGpuDownscale = typeof addon.readbackConsume === "function"
             const canOffMain = !!groupInfo && groupInfo.eligible && (!groupInfo.needsScaled || hasGpuDownscale)
@@ -919,6 +932,7 @@ export class OutputLifecycle {
         if ((OutputHelper.getOutput(id) as any)?.follower) {
             CaptureHelper.Lifecycle.stopCapture(id)
             NdiSender.stopSenderNDI(id)
+            OmtSender.stopSenderOMT(id)
             OutputHelper.deleteOutput(id)
             if (reopen) OutputLifecycle.createOutput(reopen)
             return
@@ -980,6 +994,7 @@ export class OutputLifecycle {
             this.clearPendingCaptureStart(m)
             CaptureHelper.Lifecycle.stopCapture(m)
             NdiSender.stopSenderNDI(m)
+            OmtSender.stopSenderOMT(m)
             OutputHelper.deleteOutput(m)
         }
         // sequential: each member awaits the previous, so followers attach to a live renderer window

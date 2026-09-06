@@ -139,10 +139,11 @@ export class NdiSender {
     static captureDoneCallbacks: { [id: string]: (seq: number, tl?: { recv: number; cS: number; cE: number; fS: number; fE: number; enq: number } | null) => void } = {}
     static releaseTextureCallbacks: { [id: string]: (seq: number) => void } = {}
 
-    static captureFrameNDI(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number }) {
-        const data = this.NDI[id]
-        // opts.omt: an OMT sender in the shared worker, so the capture proceeds without an NDI sender
-        if ((!data?.sender && !opts.omt) || !this.getWorker()) return false
+    static captureFrameNDI(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number } }) {
+        // the render is shared: any member with an NDI sender, or any OMT sender in the shared worker
+        // (opts.omt), keeps the capture going without an NDI sender on the renderer itself
+        const anyNdi = (opts.members?.length ? opts.members : [id]).some((m) => this.NDI[m]?.sender)
+        if ((!anyNdi && !opts.omt) || !this.getWorker()) return false
         this.worker!.postMessage({ type: "captureFrame", id, source, opts })
         return true
     }

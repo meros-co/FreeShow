@@ -646,16 +646,18 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
     }
 }
 
-async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number }) {
+async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number } }) {
     // seq identifies this in-flight capture; the osr-capture key is slotted so concurrent readbacks
     // for one output use independent pool entries
     const seq = opts.seq ?? 0
     const senderData = NDI[id]
-    const omtData = opts.omt ? OMTS[id] : undefined
     const osr = loadOsrCapture()
-    const grandiose = senderData?.sender ? await loadGrandiose() : null
-    const hasNdi = !!senderData?.sender && !!grandiose
-    const hasOmt = !!omtData?.sender
+    const membersAll = opts.members?.length ? opts.members : [id]
+    const ndiMembers = membersAll.filter((m) => NDI[m]?.sender)
+    const omtMembers = (opts.omtMembers?.length ? opts.omtMembers : opts.omt ? [id] : []).filter((m) => OMTS[m]?.sender)
+    const grandiose = ndiMembers.length ? await loadGrandiose() : null
+    const hasNdi = ndiMembers.length > 0 && !!grandiose
+    const hasOmt = omtMembers.length > 0
     if ((!hasNdi && !hasOmt) || !osr?.readback) {
         port.postMessage({ type: "releaseTexture", id, seq })
         port.postMessage({ type: "captureDone", id, seq })
@@ -664,12 +666,12 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
     const { size, ratio, framerate, format, dstW = 0, dstH = 0 } = opts
     // FS_CAP_STATS: per-frame hop timestamps posted back with captureDone (worker_threads share the
     const tl = process.env.FS_CAP_STATS ? { recv: Date.now(), cS: 0, cE: 0, fS: 0, fE: 0, enq: 0 } : null
-    const members = opts.members?.length ? opts.members : [id]
+    const members = membersAll
     const wantScaled = dstW > 0 && dstH > 0
     const slot = acquireReadbackSlot(id)
     const rbKey = `${id}#${slot}`
     if (senderData) senderData.offMain = true
-    if (omtData) omtData.offMain = true
+    for (const m of omtMembers) OMTS[m]!.offMain = true
     const twoPhase = typeof osr.readbackConsume === "function" && typeof osr.readbackFinish === "function"
     const singleDispatch = !twoPhase && typeof osr.readbackOnce === "function"
     let textureReleased = false
@@ -776,35 +778,39 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             }
         }
 
-        // OMT fan-out: the sender takes the readback in whatever format it arrived (UYVY/UYVA normally,
-        // BGRA on the legacy path); its own pacer runs at the OMT rate with its own refcounted copy
+        // OMT fan-out: every OMT member of this render takes the readback in whatever format it arrived
+        // (UYVY/UYVA normally, BGRA on the legacy path) from ONE refcounted copy; each member's pacer runs
+        // at that member's OMT rate
         if (hasOmt) {
             const omt = await loadOMT()
             if (omt) {
-                const od = OMTS[id]!
                 const obuf = acquirePacerBuf(`omt#${id}`, buffer.length)
                 buffer.copy(obuf.buf, 0, 0, buffer.length)
-                const ofr = Math.max(1, opts.omtFramerate || framerate)
-                od.paceInterval = 1000 / ofr
-                if (od.paceTimer && od.paceNextDue && od.paceNextDue > Date.now() + od.paceInterval) {
-                    clearTimeout(od.paceTimer)
-                    od.paceTimer = undefined
-                    startPacer(OMTS, id)
+                const baseFrame = makeOmtVideoFrame(omt, obuf.buf, size, ratio, Math.max(1, opts.omtFramerate || framerate), opts.transparent !== false, format)
+                for (const m of omtMembers) {
+                    const od = OMTS[m]!
+                    const ofr = Math.max(1, opts.omtFramerates?.[m] || opts.omtFramerate || framerate)
+                    od.paceInterval = 1000 / ofr
+                    if (od.paceTimer && od.paceNextDue && od.paceNextDue > Date.now() + od.paceInterval) {
+                        clearTimeout(od.paceTimer)
+                        od.paceTimer = undefined
+                        startPacer(OMTS, m)
+                    }
+                    const oFrame = baseFrame.frameRateN === Math.round(ofr * 1000) ? baseFrame : { ...baseFrame, frameRateN: Math.round(ofr * 1000) }
+                    od.paceCap = Math.max(2, (opts.depth ?? 1) + 1)
+                    const oQueue = (od.paceQueue ||= [])
+                    while (oQueue.length >= od.paceCap) {
+                        const dropped = oQueue.shift()!
+                        releasePacerRef(dropped.pbuf)
+                        od.coalescedReal = (od.coalescedReal || 0) + 1
+                    }
+                    obuf.refs++ // queue entry's ref
+                    oQueue.push({ frame: oFrame, pbuf: obuf })
+                    obuf.refs++ // lastPace pin's ref
+                    if (od.lastPace) releasePacerRef(od.lastPace.pbuf)
+                    od.lastPace = { frame: oFrame, pbuf: obuf }
+                    startPacer(OMTS, m)
                 }
-                const oFrame = makeOmtVideoFrame(omt, obuf.buf, size, ratio, ofr, opts.transparent !== false, format)
-                od.paceCap = Math.max(2, (opts.depth ?? 1) + 1)
-                const oQueue = (od.paceQueue ||= [])
-                while (oQueue.length >= od.paceCap) {
-                    const dropped = oQueue.shift()!
-                    releasePacerRef(dropped.pbuf)
-                    od.coalescedReal = (od.coalescedReal || 0) + 1
-                }
-                obuf.refs++ // queue entry's ref
-                oQueue.push({ frame: oFrame, pbuf: obuf })
-                obuf.refs++ // lastPace pin's ref
-                if (od.lastPace) releasePacerRef(od.lastPace.pbuf)
-                od.lastPace = { frame: oFrame, pbuf: obuf }
-                startPacer(OMTS, id)
             }
         }
         if (tl) tl.enq = Date.now() // pacer enqueue complete (memcpy + fan-out done) — nonzero = clean path
