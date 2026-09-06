@@ -65,6 +65,7 @@ type Sender = {
     paceTimer?: NodeJS.Timeout
     paceNextDue?: number
     paceInterval?: number
+    pendingSlot?: number // a tick that found the encoder busy: its slot time, owed to the waiting frame
     paceCap?: number
     paceMisses?: number
     paceBusy?: number
@@ -620,26 +621,38 @@ function schedulePaceTick(reg: { [id: string]: Sender }, id: string) {
     }, delay)
 }
 
+// Every send belongs to a slot on the sender's nominal timeline (one per pace interval) and carries
+// that slot's time as its timestamp, so the receiver sees an even timeline even when an encode finishes
+// late. schedulePaceTick advances paceNextDue before calling paceTick, so this tick's slot is one
+// interval back.
 function paceTick(reg: { [id: string]: Sender }, id: string) {
     const s = reg[id]
     if (!s?.sender) return
+    const slot = (s.paceNextDue || Date.now()) - (s.paceInterval || 1000 / 30)
     if (s.sendingVideo) {
         s.paceBusy = (s.paceBusy || 0) + 1
+        s.pendingSlot = slot // the waiting frame is owed this slot; paceSend's completion sends it
         return
     }
+    s.pendingSlot = undefined
     const entry = s.paceQueue?.shift()
     if (entry) {
-        void paceSend(reg, id, entry, true)
+        void paceSend(reg, id, entry, true, slot)
         return
     }
     if (s.lastPace) {
         s.paceMisses = (s.paceMisses || 0) + 1
         s.lastPace.pbuf.refs++
-        void paceSend(reg, id, s.lastPace, false)
+        void paceSend(reg, id, s.lastPace, false, slot)
     }
 }
 
-async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { frame: any; pbuf: PacerBuf }, real: boolean) {
+// slotMs (Date.now() epoch) -> the protocols' 100ns-since-epoch timestamp
+function slotTimestamp(slotMs: number): bigint {
+    return BigInt(Math.round(slotMs)) * BigInt(10000)
+}
+
+async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { frame: any; pbuf: PacerBuf }, real: boolean, slotMs: number) {
     const senderData = reg[id]
     if (!senderData?.sender) {
         releasePacerRef(entry.pbuf)
@@ -651,7 +664,7 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
         if (process.env.FS_CAP_STATS && senderData.lastRealSendAt) (senderData.realGaps ||= []).push(now - senderData.lastRealSendAt)
         senderData.lastRealSendAt = now
     }
-    const frame = { ...entry.frame, [senderData.tsKey || "timecode"]: (timeStart + process.hrtime.bigint()) / TIMECODE_DIVISOR }
+    const frame = { ...entry.frame, [senderData.tsKey || "timecode"]: slotTimestamp(slotMs) }
     const sendT0 = process.env.FS_CAP_STATS ? Date.now() : 0
     try {
         noteSendResult(senderData, id, frame, await (senderData.sendFrame ? senderData.sendFrame(frame) : senderData.sender.video(frame)))
@@ -665,11 +678,13 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
         }
         senderData.sendingVideo = false
         releasePacerRef(entry.pbuf)
-        // work-conserving: a tick that found this sender busy left its frame waiting; when the encode
-        // outlasts the tick interval, send that frame now rather than idling until the next tick
-        if (senderData.paceQueue?.length && senderData.paceNextDue !== undefined && Date.now() >= senderData.paceNextDue - (senderData.paceInterval || 0)) {
+        // a tick found this sender busy and left its frame waiting: send it now, stamped with the slot
+        // it was owed, rather than idling until the next tick (the timeline stays even; only arrival is late)
+        const owed = senderData.pendingSlot
+        if (owed !== undefined && senderData.paceQueue?.length) {
+            senderData.pendingSlot = undefined
             const next = senderData.paceQueue.shift()!
-            void paceSend(reg, id, next, true)
+            void paceSend(reg, id, next, true, owed)
         }
     }
 }
