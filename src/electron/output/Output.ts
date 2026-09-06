@@ -13,6 +13,9 @@ export class Output {
     boundsLocked?: boolean
     screen?: string | null
     intendedBounds?: Rectangle
+    // the resolution this output SENDS at (its configured size). A shared render runs at the largest
+    // member's size; smaller members are downscaled to their sendSize in the same readback pass.
+    sendSize?: { width: number; height: number }
     transparent?: boolean
     webrtcData?: any
     rtmpData?: RtmpData

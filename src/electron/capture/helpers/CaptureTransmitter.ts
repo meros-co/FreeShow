@@ -438,7 +438,8 @@ export class CaptureTransmitter {
     private static sizeMismatchLogged: { [captureId: string]: string } = {}
     private static toConfiguredSize(captureId: string, image: NativeImage): { image: NativeImage; size: Size } {
         const size = image.getSize()
-        const intended = OutputHelper.getOutput(captureId)?.intendedBounds
+        const out = OutputHelper.getOutput(captureId)
+        const intended = out?.sendSize || out?.intendedBounds
         if (!intended?.width || !intended?.height || (intended.width === size.width && intended.height === size.height)) return { image, size }
         const target = { width: intended.width, height: intended.height }
         const tag = `${size.width}x${size.height}->${target.width}x${target.height}`

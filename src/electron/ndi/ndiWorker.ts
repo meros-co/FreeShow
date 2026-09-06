@@ -689,7 +689,7 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
     }
 }
 
-async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number } }) {
+async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean }) {
     // seq identifies this in-flight capture; the osr-capture key is slotted so concurrent readbacks
     // for one output use independent pool entries
     const seq = opts.seq ?? 0
@@ -723,11 +723,20 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
         textureReleased = true
         port.postMessage({ type: "releaseTexture", id, seq })
     }
-    // one refcounted buffer per frame: the addon writes the readback straight into it and every member
-    // (NDI and OMT alike) queues that same buffer, so the frame is never copied on this thread
-    const frameBytes = format === 1 ? size.width * size.height * 2 : format === 2 ? size.width * size.height * 3 : size.width * size.height * 4
-    const framePbuf = twoPhase ? acquirePacerBuf(id, frameBytes) : null
-    let framePbufQueued = false
+    // Every member sends at its own size and format. Full-size members in the main format share the main
+    // readback buffer; each other (size, format) gets a target: produced on the GPU in the same pass when the
+    // addon supports it, else derived on this thread from a BGRA main. All buffers are refcounted pacer
+    // buffers: the addon writes straight into them and no frame is copied here on the GPU path.
+    const targets = opts.targets || []
+    const mainFormat = opts.mainFormat ?? format
+    const bytesFor = (w: number, h: number, f: number) => (f === 1 ? w * h * 2 : f === 2 ? w * h * 3 : w * h * 4)
+    const gpuTargets = twoPhase && targets.length > 0 && !opts.cpuTargets && !!osr.targetsSupported
+    const framePbuf = twoPhase ? acquirePacerBuf(id, bytesFor(size.width, size.height, format)) : null
+    const targetPbufs: PacerBuf[] = gpuTargets ? targets.map((t, i) => acquirePacerBuf(`${id}#t${i}`, bytesFor(t.width, t.height, t.format))) : []
+    const heldBufs: PacerBuf[] = [] // every pacer buffer this frame took; unqueued ones go back to their pools
+    if (framePbuf) heldBufs.push(framePbuf)
+    heldBufs.push(...targetPbufs)
+    const queued = new Set<PacerBuf>()
     try {
         let buffer: Buffer
         let scaled: Buffer | undefined
@@ -751,13 +760,13 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             }
         } else if (twoPhase) {
             if (tl) tl.cS = Date.now()
-            await osr.readbackConsume(source, size.width, size.height, format, rbKey, wantScaled ? dstW : 0, wantScaled ? dstH : 0)
+            await osr.readbackConsume(source, size.width, size.height, format, rbKey, wantScaled ? dstW : 0, wantScaled ? dstH : 0, gpuTargets ? targets : undefined)
             if (tl) tl.cE = Date.now()
             releaseTexture()
             if (tl) tl.fS = Date.now()
-            const res = await osr.readbackFinish(rbKey, size.width, size.height, format, wantScaled ? dstW : 0, wantScaled ? dstH : 0, framePbuf!.buf)
+            const res = await osr.readbackFinish(rbKey, size.width, size.height, format, wantScaled ? dstW : 0, wantScaled ? dstH : 0, framePbuf!.buf, gpuTargets ? targets : undefined, gpuTargets ? targetPbufs.map((p) => p.buf) : undefined)
             if (tl) tl.fE = Date.now()
-            if (wantScaled && res && res.main) {
+            if (res && res.main) {
                 buffer = res.main
                 scaled = res.scaled
             } else {
@@ -774,120 +783,120 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             port.postMessage({ type: "scaledFrame", id, members, buffer: scaled.buffer, byteOffset: scaled.byteOffset, byteLength: scaled.byteLength, size: { width: dstW, height: dstH } })
         }
 
-        const activeMembers = hasNdi ? members.filter((m) => NDI[m]?.sender) : []
-        if (activeMembers.length) {
-            let ndiBuffer = buffer
-            let ndiFormat = format
-            if (format === 0) {
-                const useAlpha = opts.transparent !== false
-                ndiBuffer = useAlpha ? (osr.convertBgraToUyva ? osr.convertBgraToUyva(buffer, size.width, size.height) : bgraToUyva(buffer, size.width, size.height)) : osr.convertBgraToUyvy ? osr.convertBgraToUyvy(buffer, size.width, size.height) : bgraToUyvy(buffer, size.width, size.height)
-                ndiFormat = useAlpha ? 2 : 1
+        const tFan = performance.now()
+        type FrameBuf = { pbuf: PacerBuf; width: number; height: number; format: number }
+        const convertBgra = (bgra: Buffer, w: number, h: number, f: number): Buffer => {
+            if (f === 2) return osr.convertBgraToUyva ? osr.convertBgraToUyva(bgra, w, h) : bgraToUyva(bgra, w, h)
+            if (f === 1) return osr.convertBgraToUyvy ? osr.convertBgraToUyvy(bgra, w, h) : bgraToUyvy(bgra, w, h)
+            return bgra
+        }
+        const intoPacerBuf = (owner: string, data: Buffer): PacerBuf => {
+            const tCopy = performance.now()
+            const pb = acquirePacerBuf(owner, data.length)
+            data.copy(pb.buf, 0, 0, data.length)
+            loopDiag.copyMs += performance.now() - tCopy
+            loopDiag.copyN++
+            heldBufs.push(pb)
+            return pb
+        }
+
+        // main buffer, in the format full-size members send in
+        let main: FrameBuf
+        if (format === 0 && mainFormat !== 0) {
+            // CPU-target path (or legacy single-phase): the readback is BGRA; convert once for the full-size members
+            main = { pbuf: intoPacerBuf(`${id}#m`, convertBgra(buffer, size.width, size.height, mainFormat)), width: size.width, height: size.height, format: mainFormat }
+        } else if (framePbuf && buffer === framePbuf.buf) {
+            main = { pbuf: framePbuf, width: size.width, height: size.height, format }
+        } else {
+            main = { pbuf: intoPacerBuf(id, buffer), width: size.width, height: size.height, format }
+        }
+
+        // per-target buffers
+        const targetBufs: FrameBuf[] = []
+        if (gpuTargets) {
+            targets.forEach((t, i) => targetBufs.push({ pbuf: targetPbufs[i], width: t.width, height: t.height, format: t.format }))
+        } else if (targets.length && format === 0 && typeof osr.downscaleBgra === "function") {
+            for (const t of targets) {
+                const small: Buffer = osr.downscaleBgra(buffer, size.width, size.height, t.width, t.height)
+                targetBufs.push({ pbuf: intoPacerBuf(`${id}#t`, convertBgra(small, t.width, t.height, t.format)), width: t.width, height: t.height, format: t.format })
             }
-            const fourCC: number = ndiFormat === 2 ? grandiose.FOURCC_UYVA : grandiose.FOURCC_UYVY
-            let pbuf: PacerBuf
-            if (framePbuf && ndiBuffer === framePbuf.buf) {
-                pbuf = framePbuf // the addon filled the shared frame buffer: queue it as is
-                framePbufQueued = true
-            } else {
-                const tCopyN = performance.now()
-                pbuf = acquirePacerBuf(id, ndiBuffer.length)
-                ndiBuffer.copy(pbuf.buf, 0, 0, ndiBuffer.length)
-                loopDiag.copyMs += performance.now() - tCopyN
-                loopDiag.copyN++
+        }
+        const bufFor = (m: string): FrameBuf => {
+            const ti = opts.memberTarget?.[m] ?? -1
+            return ti >= 0 && targetBufs[ti] ? targetBufs[ti] : main
+        }
+        const enqueue = (reg: { [id: string]: Sender }, m: string, frame: any, pbuf: PacerBuf, interval: number) => {
+            const md = reg[m]!
+            md.offMain = true
+            md.paceInterval = interval
+            if (md.paceTimer && md.paceNextDue && md.paceNextDue > Date.now() + md.paceInterval) {
+                clearTimeout(md.paceTimer)
+                md.paceTimer = undefined
+                startPacer(reg, m)
             }
-            const frame = {
-                timecode: (timeStart + process.hrtime.bigint()) / TIMECODE_DIVISOR,
-                xres: size.width,
-                yres: size.height,
-                frameRateN: framerate * 1000,
-                frameRateD: 1000,
-                pictureAspectRatio: ratio,
-                frameFormatType: grandiose.FORMAT_TYPE_PROGRESSIVE,
-                lineStrideBytes: size.width * 2,
-                fourCC,
-                data: pbuf.buf
+            md.paceCap = Math.max(2, (opts.depth ?? 1) + 1)
+            const queue = (md.paceQueue ||= [])
+            while (queue.length >= md.paceCap) {
+                const dropped = queue.shift()!
+                releasePacerRef(dropped.pbuf)
+                md.coalescedReal = (md.coalescedReal || 0) + 1
             }
-            for (const m of activeMembers) {
-                const md = NDI[m]!
-                md.offMain = true
-                md.tsKey ||= "timecode"
+            pbuf.refs++ // queue entry's ref
+            queue.push({ frame, pbuf })
+            pbuf.refs++ // lastPace pin's ref (repeats only fire when the queue is empty, i.e. this
+            if (md.lastPace) releasePacerRef(md.lastPace.pbuf) // frame has already been sent or dropped)
+            md.lastPace = { frame, pbuf }
+            queued.add(pbuf)
+            startPacer(reg, m)
+        }
+
+        if (hasNdi) {
+            for (const m of ndiMembers) {
+                let b = bufFor(m)
+                if (b.format === 0) {
+                    // NDI never takes BGRA: convert this member's buffer (only reachable on the legacy readback path)
+                    const f = opts.transparent !== false ? 2 : 1
+                    b = { pbuf: intoPacerBuf(`${id}#ndi`, convertBgra(b.pbuf.buf, b.width, b.height, f)), width: b.width, height: b.height, format: f }
+                }
                 const mfr = Math.max(1, opts.memberFramerates?.[m] || framerate)
-                md.paceInterval = 1000 / mfr
-                if (md.paceTimer && md.paceNextDue && md.paceNextDue > Date.now() + md.paceInterval) {
-                    clearTimeout(md.paceTimer)
-                    md.paceTimer = undefined
-                    startPacer(NDI, m)
+                NDI[m]!.tsKey ||= "timecode"
+                const frame = {
+                    timecode: (timeStart + process.hrtime.bigint()) / TIMECODE_DIVISOR,
+                    xres: b.width,
+                    yres: b.height,
+                    frameRateN: mfr * 1000,
+                    frameRateD: 1000,
+                    pictureAspectRatio: b.height ? b.width / b.height : ratio,
+                    frameFormatType: grandiose.FORMAT_TYPE_PROGRESSIVE,
+                    lineStrideBytes: b.width * 2,
+                    fourCC: b.format === 2 ? grandiose.FOURCC_UYVA : grandiose.FOURCC_UYVY,
+                    data: b.pbuf.buf
                 }
-                const mFrame = mfr === framerate ? frame : { ...frame, frameRateN: mfr * 1000 }
-                md.paceCap = Math.max(2, (opts.depth ?? 1) + 1)
-                const queue = (md.paceQueue ||= [])
-                while (queue.length >= md.paceCap) {
-                    const dropped = queue.shift()!
-                    releasePacerRef(dropped.pbuf)
-                    md.coalescedReal = (md.coalescedReal || 0) + 1
-                }
-                pbuf.refs++ // queue entry's ref
-                queue.push({ frame: mFrame, pbuf })
-                pbuf.refs++ // lastPace pin's ref (repeats only fire when the queue is empty, i.e. this
-                if (md.lastPace) releasePacerRef(md.lastPace.pbuf) // frame has already been sent or dropped)
-                md.lastPace = { frame: mFrame, pbuf }
-                startPacer(NDI, m)
+                enqueue(NDI, m, frame, b.pbuf, 1000 / mfr)
             }
         }
 
-        // OMT fan-out: every OMT member of this render takes the readback in whatever format it arrived
-        // (UYVY/UYVA normally, BGRA on the legacy path) from ONE refcounted copy; each member's pacer runs
-        // at that member's OMT rate
         if (hasOmt) {
             const omt = await loadOMT()
             if (omt) {
-                const tCopy = performance.now()
-                let obuf: PacerBuf
-                if (framePbuf && buffer === framePbuf.buf) {
-                    obuf = framePbuf // shared with the NDI members; refcounts keep it alive until all sent
-                    framePbufQueued = true
-                } else {
-                    obuf = acquirePacerBuf(`omt#${id}`, buffer.length)
-                    buffer.copy(obuf.buf, 0, 0, buffer.length)
-                    loopDiag.copyMs += performance.now() - tCopy
-                    loopDiag.copyN++
-                }
-                const baseFrame = makeOmtVideoFrame(omt, obuf.buf, size, ratio, Math.max(1, opts.omtFramerate || framerate), opts.transparent !== false, format)
                 for (const m of omtMembers) {
-                    const od = OMTS[m]!
+                    const b = bufFor(m)
                     const ofr = Math.max(1, opts.omtFramerates?.[m] || opts.omtFramerate || framerate)
-                    od.paceInterval = 1000 / ofr
-                    if (od.paceTimer && od.paceNextDue && od.paceNextDue > Date.now() + od.paceInterval) {
-                        clearTimeout(od.paceTimer)
-                        od.paceTimer = undefined
-                        startPacer(OMTS, m)
-                    }
-                    const oFrame = baseFrame.frameRateN === Math.round(ofr * 1000) ? baseFrame : { ...baseFrame, frameRateN: Math.round(ofr * 1000) }
-                    od.paceCap = Math.max(2, (opts.depth ?? 1) + 1)
-                    const oQueue = (od.paceQueue ||= [])
-                    while (oQueue.length >= od.paceCap) {
-                        const dropped = oQueue.shift()!
-                        releasePacerRef(dropped.pbuf)
-                        od.coalescedReal = (od.coalescedReal || 0) + 1
-                    }
-                    obuf.refs++ // queue entry's ref
-                    oQueue.push({ frame: oFrame, pbuf: obuf })
-                    obuf.refs++ // lastPace pin's ref
-                    if (od.lastPace) releasePacerRef(od.lastPace.pbuf)
-                    od.lastPace = { frame: oFrame, pbuf: obuf }
-                    startPacer(OMTS, m)
+                    const frame = makeOmtVideoFrame(omt, b.pbuf.buf, { width: b.width, height: b.height }, b.height ? b.width / b.height : ratio, ofr, opts.transparent !== false, b.format)
+                    enqueue(OMTS, m, frame, b.pbuf, 1000 / ofr)
                 }
-                loopDiag.fanMs += performance.now() - tCopy
             }
         }
+        loopDiag.fanMs += performance.now() - tFan
         if (tl) tl.enq = Date.now() // pacer enqueue complete (memcpy + fan-out done) — nonzero = clean path
     } catch (err) {
         console.error("Worker readback error:", err)
     } finally {
-        // nobody queued the shared frame buffer (error, or no member took it): return it to the pool
-        if (framePbuf && !framePbufQueued && framePbuf.refs === 0) {
-            const pool = pacerPools[framePbuf.owner]
-            if (pool && !pool.includes(framePbuf.buf)) pool.push(framePbuf.buf)
+        // buffers no member queued (error, or a target/main nobody used): return them to their pools
+        for (const pb of heldBufs) {
+            if (queued.has(pb) || pb.refs !== 0) continue
+            const pool = pacerPools[pb.owner]
+            if (pool && !pool.includes(pb.buf)) pool.push(pb.buf)
         }
         releaseTexture() // safety: ensure the texture is released even on error
         releaseReadbackSlot(id, slot)

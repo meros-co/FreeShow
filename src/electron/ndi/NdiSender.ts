@@ -10,6 +10,31 @@ import { CaptureHelper } from "../capture/CaptureHelper"
 // https://github.com/rse/vingester
 
 // NDI sender proxy: delegates NDI encoding and dispatch to a worker thread (./ndiWorker)
+// one readback of a shared render, fanned out to every member at that member's size and format
+export type CaptureFrameOpts = {
+    size: { width: number; height: number }
+    ratio: number
+    framerate: number
+    memberFramerates?: { [id: string]: number }
+    format: number // readback format of the main buffer (0 BGRA, 1 UYVY, 2 UYVA)
+    mainFormat?: number // the format full-size members send in (differs from `format` only on the CPU-target path)
+    transparent?: boolean
+    dstW?: number
+    dstH?: number
+    seq?: number
+    members?: string[]
+    depth?: number
+    omt?: boolean
+    omtFramerate?: number
+    omtMembers?: string[]
+    omtFramerates?: { [id: string]: number }
+    targets?: { width: number; height: number; format: number }[]
+    memberTarget?: { [id: string]: number } // -1 = main buffer, else index into targets
+    memberFormats?: { [id: string]: number }
+    memberSizes?: { [id: string]: { width: number; height: number } }
+    cpuTargets?: boolean // addon can't produce targets on the GPU here: main is BGRA and targets are CPU-derived
+}
+
 export class NdiSender {
     private static worker: Worker | null = null
     private static readonly MAX_INFLIGHT_SENDS = 3
@@ -182,7 +207,7 @@ export class NdiSender {
     static captureDoneCallbacks: { [id: string]: (seq: number, tl?: { recv: number; cS: number; cE: number; fS: number; fE: number; enq: number } | null) => void } = {}
     static releaseTextureCallbacks: { [id: string]: (seq: number) => void } = {}
 
-    static captureFrameNDI(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number } }) {
+    static captureFrameNDI(id: string, source: any, opts: CaptureFrameOpts) {
         // the render is shared: any member with an NDI sender, or any OMT sender in the shared worker
         // (opts.omt), keeps the capture going without an NDI sender on the renderer itself
         const anyNdi = (opts.members?.length ? opts.members : [id]).some((m) => this.NDI[m]?.sender)

@@ -25,18 +25,32 @@ export class RenderGroups {
         return out
     }
 
-    // Properties affecting the rendered image
+    // Properties affecting the rendered image. Size is NOT part of it: outputs of the same content at
+    // different resolutions share one render (at the largest size) and the smaller ones are downscaled
+    // from it. Aspect ratio is, since a different aspect lays the content out differently.
     static computeKey(output: Output): string {
+        const w = output.bounds?.width || 0
+        const h = output.bounds?.height || 0
         return JSON.stringify({
             stage: output.stageOutput || "",
             style: output.style || "",
             resolution: output.forcedResolution || null,
-            width: output.bounds?.width ?? null,
-            height: output.bounds?.height ?? null,
+            aspect: w && h ? Math.round((w / h) * 1000) : null,
             transparent: !!output.transparent,
             cropping: output.cropping || null,
             blending: output.blending || null
         })
+    }
+
+    // the size a group's render runs at: the largest member (all members share an aspect ratio)
+    static renderSize(id: string): { width: number; height: number } | null {
+        let best: { width: number; height: number } | null = null
+        for (const m of this.members(id)) {
+            const b = this.configs[m]?.bounds
+            if (!b?.width || !b?.height) continue
+            if (!best || b.width * b.height > best.width * best.height) best = { width: b.width, height: b.height }
+        }
+        return best
     }
 
     static add(id: string, output: Output): { isRenderer: boolean; rendererId: string } {

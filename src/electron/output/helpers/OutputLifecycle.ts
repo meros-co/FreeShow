@@ -122,12 +122,17 @@ export class OutputLifecycle {
         OutputHelper.Bounds.disableWindowMoveListener()
 
         // invisible/capture outputs render DPI-corrected so capturePage() matches the configured resolution
-        const resolvedBounds = output.invisible ? output.bounds : OutputVisibility.resolveOutputBounds(output)
+        let resolvedBounds = output.invisible ? output.bounds : OutputVisibility.resolveOutputBounds(output)
+        // a shared render runs at the largest member's size (a follower larger than this output may already
+        // be registered when a renderer is rebuilt); this output still SENDS at its own size
+        const sendSize = { width: output.bounds.width, height: output.bounds.height }
+        const groupSize = shareEligible ? RenderGroups.renderSize(id) : null
+        if (groupSize && (groupSize.width !== resolvedBounds.width || groupSize.height !== resolvedBounds.height)) resolvedBounds = { ...resolvedBounds, ...groupSize }
         const renderBounds = OutputHelper.Bounds.getRenderBounds(output, resolvedBounds)
         const outputWindow = this.createOutputWindow({ ...renderBounds, alwaysOnTop: output.alwaysOnTop !== false, backgroundColor: output.transparent ? "#00000000" : "#000000" }, id, output.name, output)
         // const previewWindow = this.createPreviewWindow({ ...output.bounds, backgroundColor: "#000000" })
 
-        OutputHelper.setOutput(id, { window: outputWindow, osr: this.isOsrOutput(output), invisible: output.invisible, boundsLocked: output.boundsLocked, screen: output.screen, intendedBounds: resolvedBounds, transparent: output.transparent, webrtcData: output.webrtcData, rtmpData: output.rtmpData })
+        OutputHelper.setOutput(id, { window: outputWindow, osr: this.isOsrOutput(output), invisible: output.invisible, boundsLocked: output.boundsLocked, screen: output.screen, intendedBounds: resolvedBounds, sendSize, transparent: output.transparent, webrtcData: output.webrtcData, rtmpData: output.rtmpData })
         // OutputHelper.setOutput(id, { window: outputWindow, previewWindow: previewWindow })
         OutputHelper.Bounds.updateBounds({ id: output.id!, bounds: resolvedBounds })
         this.updateWindowConstraints(id)
@@ -164,7 +169,8 @@ export class OutputLifecycle {
     }
 
     private static async createFollowerOutput(id: string, output: Output, rendererId: string, rendererWindow: BrowserWindow) {
-        OutputHelper.setOutput(id, { window: rendererWindow, follower: true, renderGroupRenderer: rendererId, osr: true, invisible: output.invisible, boundsLocked: output.boundsLocked, screen: output.screen, intendedBounds: output.bounds, transparent: output.transparent })
+        OutputHelper.setOutput(id, { window: rendererWindow, follower: true, renderGroupRenderer: rendererId, osr: true, invisible: output.invisible, boundsLocked: output.boundsLocked, screen: output.screen, intendedBounds: output.bounds, sendSize: { width: output.bounds.width, height: output.bounds.height }, transparent: output.transparent })
+        this.fitRendererToGroup(rendererId)
 
         this.pendingCaptureStart[id] = setTimeout(() => {
             delete this.pendingCaptureStart[id]
@@ -259,6 +265,17 @@ export class OutputLifecycle {
             options.width! += 1
             options.height! += 1
         }
+    }
+
+    // A shared render runs at its largest member's size. Called when membership changes: the renderer's
+    // offscreen window is resized to the largest member (up or down); each member keeps its own sendSize.
+    static fitRendererToGroup(rendererId: string) {
+        const renderer = OutputHelper.getOutput(rendererId)
+        if (!renderer?.window || renderer.window.isDestroyed() || !renderer.osr) return
+        const size = RenderGroups.renderSize(rendererId)
+        const current = renderer.intendedBounds
+        if (!size || !current || (current.width === size.width && current.height === size.height)) return
+        OutputHelper.Bounds.updateBounds({ id: rendererId, bounds: { ...current, width: size.width, height: size.height } })
     }
 
     // the outputs drawn by this window: the output itself plus the followers of its render group
@@ -656,7 +673,6 @@ export class OutputLifecycle {
             const framerate = output?.captureOptions?.framerates?.ndi || 30
             const ratio = height ? width / height : 16 / 9
             const transparent = output?.transparent === true
-            const fmt = transparent ? 2 : 1
             // every member of this render (the renderer itself plus its followers) gets this one readback,
             // whichever protocol each one sends on
             const members = OutputLifecycle.groupMembers(id)
@@ -670,8 +686,36 @@ export class OutputLifecycle {
             const groupInfo = CaptureHelper.Transmitter.groupOffMainInfo(members)
             const mixed = !!groupInfo && groupInfo.eligible && groupInfo.needsScaled && typeof addon.readbackConsume === "function"
             const scaled = mixed ? CaptureHelper.Transmitter.getScaledTarget({ width, height }) : null
+            // The render is the largest member's size. Each member sends at its own size and format:
+            // full-size members in the main format take the main readback; the others get a target of
+            // their own (downscale + convert in the same GPU pass; CPU-derived where the addon can't).
+            const memberSize = (m: string) => {
+                const o = OutputHelper.getOutput(m)
+                const s = o?.sendSize || o?.intendedBounds
+                return s?.width && s?.height ? { width: s.width, height: s.height } : { width, height }
+            }
+            const memberFormat = (m: string) => (OutputHelper.getOutput(m)?.transparent === true ? 2 : 1)
+            const fmt = memberFormat(id)
+            const targets: { width: number; height: number; format: number }[] = []
+            const memberTarget: { [m: string]: number } = {}
+            const memberFormats: { [m: string]: number } = {}
+            const memberSizes: { [m: string]: { width: number; height: number } } = {}
+            for (const m of members) {
+                const sz = memberSize(m)
+                const f = memberFormat(m)
+                memberFormats[m] = f
+                memberSizes[m] = sz
+                if (sz.width === width && sz.height === height && f === fmt) {
+                    memberTarget[m] = -1
+                    continue
+                }
+                let idx = targets.findIndex((t) => t.width === sz.width && t.height === sz.height && t.format === f)
+                if (idx < 0) idx = targets.push({ width: sz.width, height: sz.height, format: f }) - 1
+                memberTarget[m] = idx
+            }
+            const cpuTargets = targets.length > 0 && !addon.targetsSupported
             const seq = ++offMainSeq
-            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: fmt, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates })) {
+            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets })) {
                 forwardAt.set(seq, { t: Date.now(), unc: OutputLifecycle.globalInFlight === 0, px: width * height })
                 OutputLifecycle.globalInFlight++
                 offMainInFlight++
@@ -952,10 +996,12 @@ export class OutputLifecycle {
 
         // A FOLLOWER owns no window — just tear down its senders/capture, never touch the shared window.
         if ((OutputHelper.getOutput(id) as any)?.follower) {
+            const rendererId = (OutputHelper.getOutput(id) as any)?.renderGroupRenderer as string | undefined
             CaptureHelper.Lifecycle.stopCapture(id)
             NdiSender.stopSenderNDI(id)
             OmtSender.stopSenderOMT(id)
             OutputHelper.deleteOutput(id)
+            if (rendererId) this.fitRendererToGroup(rendererId)
             if (reopen) OutputLifecycle.createOutput(reopen)
             return
         }
