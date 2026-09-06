@@ -33,6 +33,39 @@
     const renderer = new StreamCanvasRenderer()
     let subscribedId = ""
     let unlisten: (() => void) | null = null
+
+    // The preview must never be blank. Capture frames arrive only once the output's capture is running
+    // (and only on the off-main capture path), so the mirrored output stays on screen until frames flow,
+    // and comes back if they stop. "Stopped" is judged against the measured arrival interval, not a
+    // fixed time: no frame for several measured intervals means the capture is not feeding us.
+    let liveCapture = false
+    let lastFrameAt = 0
+    let frameInterval = 0
+    let staleTimer: ReturnType<typeof setTimeout> | null = null
+    function noteFrame() {
+        const now = performance.now()
+        if (lastFrameAt) {
+            const gap = now - lastFrameAt
+            frameInterval = frameInterval ? frameInterval * 0.8 + gap * 0.2 : gap
+        }
+        lastFrameAt = now
+        if (frameInterval) {
+            liveCapture = true
+            if (staleTimer) clearTimeout(staleTimer)
+            staleTimer = setTimeout(() => {
+                liveCapture = false
+                staleTimer = null
+            }, frameInterval * 4)
+        }
+    }
+    function resetLive() {
+        liveCapture = false
+        lastFrameAt = 0
+        frameInterval = 0
+        if (staleTimer) clearTimeout(staleTimer)
+        staleTimer = null
+    }
+
     $: subscribePreview(captured && !stageOutput ? outputId : "")
     function subscribePreview(id: string) {
         if (id === subscribedId) return
@@ -42,9 +75,11 @@
             unlisten = null
         }
         subscribedId = id
+        resetLive()
         if (!id) return
         send(OUTPUT, ["PREVIEW_SUBSCRIBE"], { id })
         unlisten = onPreviewFrame(id, (frame) => {
+            noteFrame()
             if (previewCanvas) renderer.draw(previewCanvas, { xres: frame.width, yres: frame.height, data: frame.data, format: "bgra" })
         })
     }
@@ -58,10 +93,13 @@
 <div class="center previewOutput" id={outputId} class:disabled style={style + ("; aspect-ratio: " + resolution.width + "/" + resolution.height + ";")} bind:offsetWidth={width} bind:offsetHeight={height}>
     {#if stageOutput}
         <StageLayout {outputId} stageId={stageOutput} preview={!disableTransitions} edit={false} />
-    {:else if captured}
-        <canvas class="capturePreview" bind:this={previewCanvas} />
     {:else}
-        <Output {outputId} style={getStyleResolution(resolution, fullscreen ? width : resolution.width, fullscreen ? height : resolution.height, "fit")} mirror preview={!disableTransitions} />
+        {#if captured}
+            <canvas class="capturePreview" class:hidden={!liveCapture} bind:this={previewCanvas} />
+        {/if}
+        {#if !captured || !liveCapture}
+            <Output {outputId} style={getStyleResolution(resolution, fullscreen ? width : resolution.width, fullscreen ? height : resolution.height, "fit")} mirror preview={!disableTransitions} />
+        {/if}
     {/if}
 
     {#if !fullscreen && $livePrepare[outputId]}
@@ -96,6 +134,9 @@
         height: 100%;
         object-fit: contain;
         background-color: black;
+    }
+    .capturePreview.hidden {
+        display: none;
     }
 
     .previewOutput :global(.main) {
