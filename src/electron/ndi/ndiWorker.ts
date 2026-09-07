@@ -2,6 +2,7 @@ import { parentPort } from "worker_threads"
 import { loadOMT } from "../omt/omtModule"
 import { RtmpStreamer, setRtmpNoticeListener, setRtmpStatusListener } from "../streaming/RtmpStreamer"
 import { BlackmagicSender } from "../blackmagic/BlackmagicSender"
+import { FrameServer, type ServedFrame } from "../capture/FrameServer"
 
 // NDI engine in a worker_thread: colour-convert, padding and grandiose send-dispatch all run off the
 // main thread. NdiSender on the main thread is a thin proxy that forwards messages here.
@@ -730,7 +731,7 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
     }
 }
 
-async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } }; bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } } }) {
+async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } }; bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } }; webrtcMembers?: { [id: string]: { width: number; height: number } } }) {
     // seq identifies this in-flight capture; the osr-capture key is slotted so concurrent readbacks
     // for one output use independent pool entries
     const seq = opts.seq ?? 0
@@ -746,7 +747,9 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
     const hasRtmp = rtmpMembers.length > 0
     const bmdMembers = Object.keys(opts.bmdMembers || {}).filter((m) => !!BlackmagicSender.playbackData[m]?.playback)
     const hasBmd = bmdMembers.length > 0
-    if ((!hasNdi && !hasOmt && !hasRtmp && !hasBmd) || !osr?.readback) {
+    const webrtcMembers = Object.keys(opts.webrtcMembers || {})
+    const hasWebrtc = webrtcMembers.length > 0
+    if ((!hasNdi && !hasOmt && !hasRtmp && !hasBmd && !hasWebrtc) || !osr?.readback) {
         port.postMessage({ type: "releaseTexture", id, seq })
         port.postMessage({ type: "captureDone", id, seq })
         return
@@ -947,6 +950,25 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             queued.add(pb)
             RtmpStreamer.updateFrame(m, pb.buf.length === bytes ? pb.buf : pb.buf.subarray(0, bytes), { width: b.width, height: b.height }, () => releasePacerRef(pb), b.format === 4 ? "yuv420p" : "bgra")
         }
+        // WebRTC: the host window draws a BGRA frame at the output's size, served over shared memory
+        // (FrameServer); the server holds a pacer reference while it keeps or copies the frame
+        if (hasWebrtc) {
+            const server = webrtcFrames()
+            const now = Date.now()
+            for (const m of webrtcMembers) {
+                const want = opts.webrtcMembers![m]
+                const ti = targetBufs.findIndex((t) => t.width === want.width && t.height === want.height && t.format === 0)
+                const b = ti >= 0 ? targetBufs[ti] : main.format === 0 && main.width === want.width && main.height === want.height ? main : null
+                if (!b) continue
+                const bytes = bytesFor(b.width, b.height, 0)
+                const frame: ServedFrame = { xres: b.width, yres: b.height, format: "bgra", data: b.pbuf.buf.length === bytes ? b.pbuf.buf : b.pbuf.buf.subarray(0, bytes) }
+                servedPacer.set(frame, b.pbuf)
+                // the buffer is the server's to release once it retained it; without a window it stays
+                // unqueued and returns to its pool below
+                server.deliver(m, "WEBRTC", m, frame, now)
+                if (b.pbuf.refs > 0) queued.add(b.pbuf)
+            }
+        }
         // Blackmagic: the card's scheduler retains what it is given, so it gets its own copy of the frame at
         // the card's mode (UYVY straight in when the card takes it raw, else BGRA converted by the sender)
         for (const m of bmdMembers) {
@@ -1088,8 +1110,35 @@ setInterval(() => {
     if (Object.keys(BlackmagicSender.playbackData).length) port.postMessage({ type: "bmdAudioQueued", length: BlackmagicSender.audioQueueLength })
 }, 250)
 
+// WebRTC host window: frames leave here over the shared-memory transport (see capture/FrameServer.ts);
+// main relays the socket details to the window and nothing else
+const servedPacer = new WeakMap<ServedFrame, PacerBuf>()
+let webrtcServer: FrameServer | null = null
+function webrtcFrames() {
+    if (webrtcServer) return webrtcServer
+    webrtcServer = new FrameServer({
+        log: (text) => console.info("[webrtc frames]", text),
+        onListening: (info) => port.postMessage({ type: "webrtcWs", port: info.port, token: info.token }),
+        onNeedTarget: (targetId) => port.postMessage({ type: "webrtcNeedTarget", targetId }),
+        retain: (frame) => {
+            const pb = servedPacer.get(frame)
+            if (pb) pb.refs++
+        },
+        release: (frame) => {
+            const pb = servedPacer.get(frame)
+            if (pb) releasePacerRef(pb)
+        },
+        stats: !!process.env.FS_CAP_STATS
+    })
+    return webrtcServer
+}
+
 port.on("message", (msg: any) => {
     switch (msg?.type) {
+        case "webrtcReset":
+            // the host window went away or (re)loaded: forget its targets so the next frame asks again
+            if (webrtcServer) for (const m of Object.keys(webrtcServer.targets())) webrtcServer.drop(m)
+            break
         case "bmdInit":
             void BlackmagicSender.initialize(msg.outputId, msg.deviceIndex, msg.displayMode, msg.pixelFormat, msg.enableKeying, msg.audioChannels, msg.colorSpace).then(
                 () => bmdReportState(msg.outputId),

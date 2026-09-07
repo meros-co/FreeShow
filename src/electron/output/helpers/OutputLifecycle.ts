@@ -4,6 +4,7 @@ import { OUTPUT } from "../../../types/Channels"
 import type { Output } from "../../../types/Output"
 import { BlackmagicBridge as BlackmagicSender } from "../../blackmagic/BlackmagicBridge"
 import { RtmpBridge } from "../../streaming/RtmpBridge"
+import { WebRtcHost } from "../../streaming/WebRtcHost"
 import { gpuCompositingAvailable, gpuStateSettled } from "../../utils/gpu"
 import { initializeSender } from "../../blackmagic/bmdTalk"
 import { CaptureHelper } from "../../capture/CaptureHelper"
@@ -164,9 +165,11 @@ export class OutputLifecycle {
     }
 
     // NDI and OMT capture outputs share a render (one render per content, fanned out to every sender);
-    // blackmagic/webrtc/rtmp need dedicated capture, and displayed (non-OSR) outputs need their own window
+    // Blackmagic needs dedicated capture, and displayed (non-OSR) outputs need their own window. WebRTC
+    // and RTMP outputs are served by the capture worker from the shared readback (a target at their own
+    // size), so they join a render like NDI/OMT ones do.
     private static canShareRender(output: Output): boolean {
-        return (!!output.ndi || !!output.omt) && !output.blackmagic && !output.webrtcData?.streaming && !output.rtmpData?.streaming && this.isOsrOutput(output)
+        return (!!output.ndi || !!output.omt || !!output.webrtc || !!output.rtmp) && !output.blackmagic && this.isOsrOutput(output)
     }
 
     private static async createFollowerOutput(id: string, output: Output, rendererId: string, rendererWindow: BrowserWindow) {
@@ -733,9 +736,19 @@ export class OutputLifecycle {
                 bmdMembers[m] = { width: sz.width, height: sz.height, format: f, framerate: bfr }
                 if (!(sz.width === width && sz.height === height && f === fmt) && !targets.some((t) => t.width === sz.width && t.height === sz.height && t.format === f)) targets.push({ width: sz.width, height: sz.height, format: f })
             }
+            // members streaming WebRTC: the host window draws a BGRA frame at the output's size
+            const webrtcMembers: { [m: string]: { width: number; height: number } } = {}
+            if (WebRtcHost.isRunning()) {
+                for (const m of members) {
+                    if (!OutputHelper.getOutput(m)?.webrtcData?.streaming) continue
+                    const sz = memberSizes[m] || { width, height }
+                    webrtcMembers[m] = sz
+                    if (!targets.some((t) => t.width === sz.width && t.height === sz.height && t.format === 0)) targets.push({ width: sz.width, height: sz.height, format: 0 })
+                }
+            }
             const cpuTargets = targets.length > 0 && !addon.targetsSupported
             const seq = ++offMainSeq
-            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, rtmpMembers, bmdMembers })) {
+            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, rtmpMembers, bmdMembers, webrtcMembers })) {
                 forwardAt.set(seq, { t: Date.now(), unc: OutputLifecycle.globalInFlight === 0, px: width * height })
                 OutputLifecycle.globalInFlight++
                 offMainInFlight++
@@ -890,7 +903,7 @@ export class OutputLifecycle {
             const requestedFormat = CaptureHelper.Transmitter.getReadbackFormat(id, { width, height })
 
             const members = OutputLifecycle.groupMembers(id)
-            const offMainIds = members.filter((m) => !!NdiSender.NDI[m]?.sender || !!OmtSender.OMT[m]?.sender)
+            const offMainIds = members.filter((m) => !!NdiSender.NDI[m]?.sender || !!OmtSender.OMT[m]?.sender || !!RtmpBridge.runningConfig(m) || (WebRtcHost.isRunning() && !!OutputHelper.getOutput(m)?.webrtcData?.streaming))
             const groupInfo = offMainIds.length ? CaptureHelper.Transmitter.groupOffMainInfo(offMainIds) : null
             const hasGpuDownscale = typeof addon.readbackConsume === "function"
             const canOffMain = !!groupInfo && groupInfo.eligible && (!groupInfo.needsScaled || hasGpuDownscale)

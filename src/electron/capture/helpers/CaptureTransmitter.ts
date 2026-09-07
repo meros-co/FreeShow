@@ -104,7 +104,7 @@ export class CaptureTransmitter {
         const heavy = Object.keys(this.channels)
             .filter((k) => k.startsWith(`${captureId}-`))
             .map((k) => this.channels[k].key)
-            .filter((key) => key !== "ndi" && key !== "omt" && key !== "rtmp" && key !== "blackmagic")
+            .filter((key) => key !== "ndi" && key !== "omt" && key !== "rtmp" && key !== "blackmagic" && key !== "webrtc")
         if (heavy.some((key) => key !== "server" && key !== "stage")) return null
         return heavy
     }
@@ -137,7 +137,7 @@ export class CaptureTransmitter {
             const heavy = Object.keys(this.channels)
                 .filter((k) => k.startsWith(`${id}-`))
                 .map((k) => this.channels[k].key)
-                .filter((key) => key !== "ndi" && key !== "omt" && key !== "rtmp" && key !== "blackmagic")
+                .filter((key) => key !== "ndi" && key !== "omt" && key !== "rtmp" && key !== "blackmagic" && key !== "webrtc")
             if (heavy.some((key) => key !== "server" && key !== "stage")) return { eligible: false, needsScaled: false }
             if (heavy.length) needsScaled = true
         }

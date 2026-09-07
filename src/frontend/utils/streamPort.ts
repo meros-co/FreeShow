@@ -63,7 +63,7 @@ if (typeof window !== "undefined") {
             dispatch(message.ipcChannel, { id: message.id, frame: { xres: message.xres, yres: message.yres, format: message.format, data: new Uint8Array(buffer) }, time: message.time })
             // The components draw in Svelte's flush, a microtask they queued during dispatch; this one
             // runs after it, so the upload has read the buffer and it can go back to be refilled.
-            queueMicrotask(() => window.postMessage({ type: "STREAM_ACK", slot: message.slot, data: buffer }, "*", [buffer]))
+            queueMicrotask(() => window.postMessage({ type: "STREAM_ACK", target: message.target, slot: message.slot, data: buffer }, "*", [buffer]))
             return
         }
         if (message?.type === "STREAM_WS" && message.port && message.token) {

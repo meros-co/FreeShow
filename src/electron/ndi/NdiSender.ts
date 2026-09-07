@@ -35,6 +35,7 @@ export type CaptureFrameOpts = {
     cpuTargets?: boolean // addon can't produce targets on the GPU here: main is BGRA and targets are CPU-derived
     rtmpMembers?: { [id: string]: { width: number; height: number } } // members streaming RTMP, at their broadcast size
     bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } } // members on a Blackmagic device, at the card's mode
+    webrtcMembers?: { [id: string]: { width: number; height: number } } // members streaming WebRTC: a BGRA frame at the output's size for the host window
 }
 
 export class NdiSender {
@@ -81,6 +82,8 @@ export class NdiSender {
     static rtmpMessageHandler: ((msg: any) => void) | null = null
     // Blackmagic output messages (device state, audio queue) go to BlackmagicBridge
     static bmdMessageHandler: ((msg: any) => void) | null = null
+    // WebRTC host wiring (`webrtc*` messages from the worker's frame server)
+    static webrtcMessageHandler: ((msg: any) => void) | null = null
 
     private static onWorkerMessage(msg: any) {
         const t0 = process.env.FS_CAP_STATS ? performance.now() : 0
@@ -108,6 +111,10 @@ export class NdiSender {
         }
         if (String(msg.type).startsWith("bmd")) {
             this.bmdMessageHandler?.(msg)
+            return
+        }
+        if (String(msg.type).startsWith("webrtc")) {
+            this.webrtcMessageHandler?.(msg)
             return
         }
         if (String(msg.type).endsWith("Omt")) {
@@ -225,7 +232,8 @@ export class NdiSender {
         // the render is shared: any member with an NDI sender, or any OMT sender in the shared worker
         // (opts.omt), keeps the capture going without an NDI sender on the renderer itself
         const anyNdi = (opts.members?.length ? opts.members : [id]).some((m) => this.NDI[m]?.sender)
-        if ((!anyNdi && !opts.omt) || !this.getWorker()) return false
+        const anyWorkerConsumer = Object.keys(opts.webrtcMembers || {}).length > 0 || Object.keys(opts.rtmpMembers || {}).length > 0
+        if ((!anyNdi && !opts.omt && !anyWorkerConsumer) || !this.getWorker()) return false
         this.worker!.postMessage({ type: "captureFrame", id, source, opts })
         return true
     }
