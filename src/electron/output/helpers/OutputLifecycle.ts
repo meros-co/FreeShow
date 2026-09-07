@@ -2,7 +2,7 @@ import { BrowserWindow, screen, type BrowserWindowConstructorOptions } from "ele
 import { OUTPUT_CONSOLE, getMainWindow, hardwareAccelerationDisabled, isMac, loadWindowContent, toApp } from "../.."
 import { OUTPUT } from "../../../types/Channels"
 import type { Output } from "../../../types/Output"
-import { BlackmagicSender } from "../../blackmagic/BlackmagicSender"
+import { BlackmagicBridge as BlackmagicSender } from "../../blackmagic/BlackmagicBridge"
 import { RtmpBridge } from "../../streaming/RtmpBridge"
 import { gpuCompositingAvailable, gpuStateSettled } from "../../utils/gpu"
 import { initializeSender } from "../../blackmagic/bmdTalk"
@@ -722,9 +722,20 @@ export class OutputLifecycle {
                 rtmpMembers[m] = { width: cfg.width, height: cfg.height }
                 if (!targets.some((t) => t.width === cfg.width && t.height === cfg.height && t.format === 4)) targets.push({ width: cfg.width, height: cfg.height, format: 4 })
             }
+            // members on a Blackmagic device: a frame at the card's mode, UYVY when the card takes it raw
+            const bmdMembers: { [m: string]: { width: number; height: number; format: number; framerate: number } } = {}
+            for (const m of members) {
+                if (!BlackmagicSender.isReady(m)) continue
+                const bfr = OutputHelper.getOutput(m)?.captureOptions?.framerates?.blackmagic
+                if (!bfr) continue
+                const sz = BlackmagicSender.getTargetDimensions(m)
+                const f = BlackmagicSender.canAcceptRawUyvy(m, sz) ? 1 : 0
+                bmdMembers[m] = { width: sz.width, height: sz.height, format: f, framerate: bfr }
+                if (!(sz.width === width && sz.height === height && f === fmt) && !targets.some((t) => t.width === sz.width && t.height === sz.height && t.format === f)) targets.push({ width: sz.width, height: sz.height, format: f })
+            }
             const cpuTargets = targets.length > 0 && !addon.targetsSupported
             const seq = ++offMainSeq
-            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, rtmpMembers })) {
+            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, rtmpMembers, bmdMembers })) {
                 forwardAt.set(seq, { t: Date.now(), unc: OutputLifecycle.globalInFlight === 0, px: width * height })
                 OutputLifecycle.globalInFlight++
                 offMainInFlight++

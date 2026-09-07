@@ -34,6 +34,7 @@ export type CaptureFrameOpts = {
     memberSizes?: { [id: string]: { width: number; height: number } }
     cpuTargets?: boolean // addon can't produce targets on the GPU here: main is BGRA and targets are CPU-derived
     rtmpMembers?: { [id: string]: { width: number; height: number } } // members streaming RTMP, at their broadcast size
+    bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } } // members on a Blackmagic device, at the card's mode
 }
 
 export class NdiSender {
@@ -78,6 +79,8 @@ export class NdiSender {
     static auxMessageHandler: ((msg: any) => void) | null = null
     // RTMP engine messages (status/notice/stopped) go to RtmpBridge the same way
     static rtmpMessageHandler: ((msg: any) => void) | null = null
+    // Blackmagic output messages (device state, audio queue) go to BlackmagicBridge
+    static bmdMessageHandler: ((msg: any) => void) | null = null
 
     private static onWorkerMessage(msg: any) {
         const t0 = process.env.FS_CAP_STATS ? performance.now() : 0
@@ -101,6 +104,10 @@ export class NdiSender {
         if (!msg?.type) return
         if (String(msg.type).startsWith("rtmp")) {
             this.rtmpMessageHandler?.(msg)
+            return
+        }
+        if (String(msg.type).startsWith("bmd")) {
+            this.bmdMessageHandler?.(msg)
             return
         }
         if (String(msg.type).endsWith("Omt")) {

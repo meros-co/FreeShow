@@ -1,5 +1,5 @@
 import { isAudioEnabled } from "../../audio/processAudio"
-import { BlackmagicSender } from "../../blackmagic/BlackmagicSender"
+import { BlackmagicBridge as BlackmagicSender } from "../../blackmagic/BlackmagicBridge"
 import { OutputHelper } from "../../output/OutputHelper"
 import { getRtmpEncoderSetting } from "../../streaming/encoderDetection"
 import { RtmpBridge as RtmpStreamer } from "../../streaming/RtmpBridge"

@@ -1,6 +1,7 @@
 import { parentPort } from "worker_threads"
 import { loadOMT } from "../omt/omtModule"
 import { RtmpStreamer, setRtmpNoticeListener, setRtmpStatusListener } from "../streaming/RtmpStreamer"
+import { BlackmagicSender } from "../blackmagic/BlackmagicSender"
 
 // NDI engine in a worker_thread: colour-convert, padding and grandiose send-dispatch all run off the
 // main thread. NdiSender on the main thread is a thin proxy that forwards messages here.
@@ -729,7 +730,7 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
     }
 }
 
-async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } } }) {
+async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } }; bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } } }) {
     // seq identifies this in-flight capture; the osr-capture key is slotted so concurrent readbacks
     // for one output use independent pool entries
     const seq = opts.seq ?? 0
@@ -743,7 +744,9 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
     const hasOmt = omtMembers.length > 0
     const rtmpMembers = Object.keys(opts.rtmpMembers || {}).filter((m) => RtmpStreamer.isRunning(m))
     const hasRtmp = rtmpMembers.length > 0
-    if ((!hasNdi && !hasOmt && !hasRtmp) || !osr?.readback) {
+    const bmdMembers = Object.keys(opts.bmdMembers || {}).filter((m) => !!BlackmagicSender.playbackData[m]?.playback)
+    const hasBmd = bmdMembers.length > 0
+    if ((!hasNdi && !hasOmt && !hasRtmp && !hasBmd) || !osr?.readback) {
         port.postMessage({ type: "releaseTexture", id, seq })
         port.postMessage({ type: "captureDone", id, seq })
         return
@@ -944,6 +947,18 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             queued.add(pb)
             RtmpStreamer.updateFrame(m, pb.buf.length === bytes ? pb.buf : pb.buf.subarray(0, bytes), { width: b.width, height: b.height }, () => releasePacerRef(pb), b.format === 4 ? "yuv420p" : "bgra")
         }
+        // Blackmagic: the card's scheduler retains what it is given, so it gets its own copy of the frame at
+        // the card's mode (UYVY straight in when the card takes it raw, else BGRA converted by the sender)
+        for (const m of bmdMembers) {
+            const want = opts.bmdMembers![m]
+            if (!BlackmagicSender.canAcceptFrame(m)) continue
+            const ti = targetBufs.findIndex((t) => t.width === want.width && t.height === want.height && t.format === want.format)
+            const b = ti >= 0 ? targetBufs[ti] : main.width === want.width && main.height === want.height && main.format === want.format ? main : null
+            if (!b) continue
+            const bytes = bytesFor(b.width, b.height, b.format)
+            const marker = BlackmagicSender.audioQueueLength > 0 ? BMD_AUDIO_MARKER : null
+            BlackmagicSender.scheduleFrame(m, Buffer.from(b.pbuf.buf.subarray(0, bytes)), marker, want.framerate, b.format === 1)
+        }
         loopDiag.fanMs += performance.now() - tFan
         if (tl) tl.enq = Date.now() // pacer enqueue complete (memcpy + fan-out done) — nonzero = clean path
     } catch (err) {
@@ -1063,8 +1078,48 @@ setInterval(() => {
     }
 }, 1000)
 
+// Blackmagic output lives here too (BlackmagicBridge on main mirrors device state)
+const BMD_AUDIO_MARKER = Buffer.from([1])
+function bmdReportState(outputId: string) {
+    const d = BlackmagicSender.playbackData[outputId]
+    port.postMessage({ type: "bmdState", outputId, ready: !!d?.playback, displayMode: d?.displayMode || "", pixelFormat: d?.pixelFormat || "", enableKeying: !!d?.enableKeying, colorSpace: d?.colorSpace || "", targetSize: d?.targetSize || null, stable: BlackmagicSender.isDeviceStable(outputId) })
+}
+setInterval(() => {
+    if (Object.keys(BlackmagicSender.playbackData).length) port.postMessage({ type: "bmdAudioQueued", length: BlackmagicSender.audioQueueLength })
+}, 250)
+
 port.on("message", (msg: any) => {
     switch (msg?.type) {
+        case "bmdInit":
+            void BlackmagicSender.initialize(msg.outputId, msg.deviceIndex, msg.displayMode, msg.pixelFormat, msg.enableKeying, msg.audioChannels, msg.colorSpace).then(
+                () => bmdReportState(msg.outputId),
+                (err) => {
+                    console.error("Blackmagic init failed:", err)
+                    bmdReportState(msg.outputId)
+                }
+            )
+            break
+        case "bmdStop":
+            BlackmagicSender.stop(msg.outputId)
+            bmdReportState(msg.outputId)
+            break
+        case "bmdStopAll":
+            BlackmagicSender.stopAll()
+            break
+        case "bmdShutdown":
+            BlackmagicSender.shutdown()
+            break
+        case "bmdReset":
+            BlackmagicSender.resetProblematicDevice(msg.outputId)
+            break
+        case "bmdAudio":
+            BlackmagicSender.sendAudioBuffer(Buffer.from(msg.buffer, msg.byteOffset, msg.byteLength), msg.opts)
+            break
+        case "bmdFrame": {
+            const marker = BlackmagicSender.audioQueueLength > 0 ? BMD_AUDIO_MARKER : null
+            BlackmagicSender.scheduleFrame(msg.outputId, Buffer.from(msg.buffer, msg.byteOffset, msg.byteLength), marker, msg.framerate, !!msg.preConverted)
+            break
+        }
         case "rtmpUpdate":
             rtmpStopWatch.add(msg.outputId)
             RtmpStreamer.update(msg.outputId, msg.config, msg.destinations, { ffmpegPath: msg.ffmpegPath, encoderId: msg.encoderId })

@@ -1,7 +1,7 @@
 import { nativeImage, type NativeImage, type Size } from "electron"
 import os from "os"
 import { OUTPUT_STREAM } from "../../../types/Channels"
-import { BlackmagicSender } from "../../blackmagic/BlackmagicSender"
+import { BlackmagicBridge as BlackmagicSender } from "../../blackmagic/BlackmagicBridge"
 import { NdiSender } from "../../ndi/NdiSender"
 import util from "../../ndi/vingester-util"
 import { OmtSender } from "../../omt/OmtSender"
@@ -19,7 +19,6 @@ export type Channel = {
     lastFrameTime: number
 }
 export class CaptureTransmitter {
-    private static readonly AUDIO_PRESENT_MARKER = Buffer.from([1])
     private static readonly IS_BIG_ENDIAN = os.endianness() === "BE"
     private static readonly UNCHANGED_KEEPALIVE_MS = 1000
     private static readonly REQUEST_LIST_MAX = 100
@@ -105,7 +104,7 @@ export class CaptureTransmitter {
         const heavy = Object.keys(this.channels)
             .filter((k) => k.startsWith(`${captureId}-`))
             .map((k) => this.channels[k].key)
-            .filter((key) => key !== "ndi" && key !== "omt" && key !== "rtmp")
+            .filter((key) => key !== "ndi" && key !== "omt" && key !== "rtmp" && key !== "blackmagic")
         if (heavy.some((key) => key !== "server" && key !== "stage")) return null
         return heavy
     }
@@ -138,7 +137,7 @@ export class CaptureTransmitter {
             const heavy = Object.keys(this.channels)
                 .filter((k) => k.startsWith(`${id}-`))
                 .map((k) => this.channels[k].key)
-                .filter((key) => key !== "ndi" && key !== "omt" && key !== "rtmp")
+                .filter((key) => key !== "ndi" && key !== "omt" && key !== "rtmp" && key !== "blackmagic")
             if (heavy.some((key) => key !== "server" && key !== "stage")) return { eligible: false, needsScaled: false }
             if (heavy.length) needsScaled = true
         }
@@ -390,9 +389,7 @@ export class CaptureTransmitter {
             if (!BlackmagicSender.canAcceptFrame(captureId)) return
             const framerate = OutputHelper.getOutput(captureId)?.captureOptions?.framerates?.blackmagic
             if (!framerate) return
-            const audioBuffer = BlackmagicSender.audioQueueLength > 0 ? this.AUDIO_PRESENT_MARKER : null
-            // own copy: the native scheduler must not retain/mutate the shared readback buffer
-            BlackmagicSender.scheduleFrame(captureId, Buffer.from(buffer), audioBuffer, framerate, true)
+            BlackmagicSender.scheduleFrame(captureId, buffer, size, framerate, true)
             return
         }
         // BGRA: build a NativeImage once and use the standard converter path
@@ -582,14 +579,14 @@ export class CaptureTransmitter {
         }
 
         const buffer = image.toBitmap({ scaleFactor: 1 })
+        const frameSize = image.getSize()
         // release immediately to prevent memory accumulation
         image = null as any
 
         const framerate = OutputHelper.getOutput(captureId)?.captureOptions?.framerates?.blackmagic
         if (!framerate) return
 
-        const audioBuffer = BlackmagicSender.audioQueueLength > 0 ? this.AUDIO_PRESENT_MARKER : null
-        BlackmagicSender.scheduleFrame(captureId, buffer, audioBuffer, framerate)
+        BlackmagicSender.scheduleFrame(captureId, buffer, frameSize, framerate, false)
     }
 
     // MAIN (STAGE OUTPUT)
