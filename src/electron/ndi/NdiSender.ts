@@ -33,6 +33,7 @@ export type CaptureFrameOpts = {
     memberFormats?: { [id: string]: number }
     memberSizes?: { [id: string]: { width: number; height: number } }
     cpuTargets?: boolean // addon can't produce targets on the GPU here: main is BGRA and targets are CPU-derived
+    rtmpMembers?: { [id: string]: { width: number; height: number } } // members streaming RTMP, at their broadcast size
 }
 
 export class NdiSender {
@@ -75,6 +76,8 @@ export class NdiSender {
 
     // OMT proxy messages are routed to OmtSender through this handler rather than a direct import, avoiding a cycle
     static auxMessageHandler: ((msg: any) => void) | null = null
+    // RTMP engine messages (status/notice/stopped) go to RtmpBridge the same way
+    static rtmpMessageHandler: ((msg: any) => void) | null = null
 
     private static onWorkerMessage(msg: any) {
         const t0 = process.env.FS_CAP_STATS ? performance.now() : 0
@@ -96,6 +99,10 @@ export class NdiSender {
 
     private static onWorkerMessageBody(msg: any) {
         if (!msg?.type) return
+        if (String(msg.type).startsWith("rtmp")) {
+            this.rtmpMessageHandler?.(msg)
+            return
+        }
         if (String(msg.type).endsWith("Omt")) {
             this.auxMessageHandler?.(msg)
             return

@@ -7,7 +7,7 @@ import util from "../../ndi/vingester-util"
 import { OmtSender } from "../../omt/OmtSender"
 import { OutputHelper } from "../../output/OutputHelper"
 import { getConnections, getStageStreamSubscriberIds, toServer, toStageStreamSubscribers } from "../../servers"
-import { RtmpStreamer } from "../../streaming/RtmpStreamer"
+import { RtmpBridge as RtmpStreamer } from "../../streaming/RtmpBridge"
 import { WebRtcHost } from "../../streaming/WebRtcHost"
 import { CaptureHelper } from "../CaptureHelper"
 import { PreviewStream } from "../PreviewStream"
@@ -100,12 +100,12 @@ export class CaptureTransmitter {
         return 0
     }
 
-    // Returns non-NDI/OMT consumers eligible for off-main capture (server/stage), or null if full-res path needed
+    // Returns non-NDI/OMT/RTMP consumers eligible for off-main capture (server/stage), or null if full-res path needed
     static getHeavyOffMainConsumers(captureId: string): string[] | null {
         const heavy = Object.keys(this.channels)
             .filter((k) => k.startsWith(`${captureId}-`))
             .map((k) => this.channels[k].key)
-            .filter((key) => key !== "ndi" && key !== "omt")
+            .filter((key) => key !== "ndi" && key !== "omt" && key !== "rtmp")
         if (heavy.some((key) => key !== "server" && key !== "stage")) return null
         return heavy
     }
@@ -138,7 +138,7 @@ export class CaptureTransmitter {
             const heavy = Object.keys(this.channels)
                 .filter((k) => k.startsWith(`${id}-`))
                 .map((k) => this.channels[k].key)
-                .filter((key) => key !== "ndi" && key !== "omt")
+                .filter((key) => key !== "ndi" && key !== "omt" && key !== "rtmp")
             if (heavy.some((key) => key !== "server" && key !== "stage")) return { eligible: false, needsScaled: false }
             if (heavy.length) needsScaled = true
         }

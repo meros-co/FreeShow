@@ -3,7 +3,7 @@ import { BlackmagicSender } from "../blackmagic/BlackmagicSender"
 import { NdiSender } from "../ndi/NdiSender"
 import { OmtSender } from "../omt/OmtSender"
 import { getServerData, toServer } from "../servers"
-import { RtmpStreamer } from "../streaming/RtmpStreamer"
+import { RtmpBridge as RtmpStreamer } from "../streaming/RtmpBridge"
 import { WebRtcHost } from "../streaming/WebRtcHost"
 import { IcecastSender } from "./IcecastSender"
 

@@ -19,7 +19,7 @@ import { receiveNDI } from "./ndi/talk"
 import { receiveOMT } from "./omt/talk"
 import { OutputHelper } from "./output/OutputHelper"
 import { RenderGroups } from "./output/helpers/RenderGroups"
-import { setRtmpNoticeListener, setRtmpStatusListener } from "./streaming/RtmpStreamer"
+import { RtmpBridge } from "./streaming/RtmpBridge"
 import { callClose, exitApp, saveAndClose } from "./utils/close"
 import { applyCommandLineSwitches } from "./utils/commandLineSwitches"
 import { applyGraphicsDeviceSelection, scheduleGpuHealthCheck } from "./utils/gpu"
@@ -152,8 +152,8 @@ async function startApp() {
 
     setTimeout(createLoading)
 
-    setRtmpStatusListener((outputId, destinations) => sendToMain(ToMain.RTMP_STATUS, { outputId, destinations }))
-    setRtmpNoticeListener((message) => sendToMain(ToMain.ALERT, message))
+    RtmpBridge.setStatusListener((outputId, destinations) => sendToMain(ToMain.RTMP_STATUS, { outputId, destinations }))
+    RtmpBridge.setNoticeListener((message) => sendToMain(ToMain.ALERT, message))
 
     await setupStores()
 

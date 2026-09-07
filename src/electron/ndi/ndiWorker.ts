@@ -1,5 +1,6 @@
 import { parentPort } from "worker_threads"
 import { loadOMT } from "../omt/omtModule"
+import { RtmpStreamer, setRtmpNoticeListener, setRtmpStatusListener } from "../streaming/RtmpStreamer"
 
 // NDI engine in a worker_thread: colour-convert, padding and grandiose send-dispatch all run off the
 // main thread. NdiSender on the main thread is a thin proxy that forwards messages here.
@@ -689,7 +690,7 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
     }
 }
 
-async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean }) {
+async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } } }) {
     // seq identifies this in-flight capture; the osr-capture key is slotted so concurrent readbacks
     // for one output use independent pool entries
     const seq = opts.seq ?? 0
@@ -701,7 +702,9 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
     const grandiose = ndiMembers.length ? await loadGrandiose() : null
     const hasNdi = ndiMembers.length > 0 && !!grandiose
     const hasOmt = omtMembers.length > 0
-    if ((!hasNdi && !hasOmt) || !osr?.readback) {
+    const rtmpMembers = Object.keys(opts.rtmpMembers || {}).filter((m) => RtmpStreamer.isRunning(m))
+    const hasRtmp = rtmpMembers.length > 0
+    if ((!hasNdi && !hasOmt && !hasRtmp) || !osr?.readback) {
         port.postMessage({ type: "releaseTexture", id, seq })
         port.postMessage({ type: "captureDone", id, seq })
         return
@@ -887,6 +890,18 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
                 }
             }
         }
+        // RTMP: ffmpeg wants BGRA at the broadcast size. The engine borrows the pacer buffer (one ref) and
+        // releases it when a newer frame replaces it, so no copy is made on this thread
+        for (const m of rtmpMembers) {
+            const want = opts.rtmpMembers![m]
+            const ti = targetBufs.findIndex((t) => t.width === want.width && t.height === want.height && t.format === 0)
+            const b = ti >= 0 ? targetBufs[ti] : main.format === 0 && main.width === want.width && main.height === want.height ? main : null
+            if (!b) continue
+            const pb = b.pbuf
+            pb.refs++
+            queued.add(pb)
+            RtmpStreamer.updateFrame(m, pb.buf.length === b.width * b.height * 4 ? pb.buf : pb.buf.subarray(0, b.width * b.height * 4), { width: b.width, height: b.height }, () => releasePacerRef(pb))
+        }
         loopDiag.fanMs += performance.now() - tFan
         if (tl) tl.enq = Date.now() // pacer enqueue complete (memcpy + fan-out done) — nonzero = clean path
     } catch (err) {
@@ -988,8 +1003,44 @@ async function sendAudioBuffer(buffer: Buffer, { sampleRate, channelCount }: { s
 }
 // ---- end audio -------------------------------------------------------------------------------------------
 
+// This thread carries every sender: an unhandled error from one child process or callback must not
+// take all outputs down with it. Log it and keep running.
+process.on("uncaughtException", (err) => console.error("[capture worker] uncaught exception:", err))
+process.on("unhandledRejection", (err) => console.error("[capture worker] unhandled rejection:", err))
+
+// RTMP engine lives here (RtmpBridge on main proxies control and mirrors status)
+setRtmpStatusListener((outputId, destinations) => port.postMessage({ type: "rtmpStatus", outputId, destinations }))
+setRtmpNoticeListener((message) => port.postMessage({ type: "rtmpNotice", message }))
+const rtmpStopWatch = new Set<string>()
+setInterval(() => {
+    // the engine stops on its own when destinations vanish or the encoder gives up: tell main
+    for (const id of [...rtmpStopWatch]) {
+        if (RtmpStreamer.isRunning(id)) continue
+        rtmpStopWatch.delete(id)
+        port.postMessage({ type: "rtmpStopped", outputId: id })
+    }
+}, 1000)
+
 port.on("message", (msg: any) => {
     switch (msg?.type) {
+        case "rtmpUpdate":
+            rtmpStopWatch.add(msg.outputId)
+            RtmpStreamer.update(msg.outputId, msg.config, msg.destinations, { ffmpegPath: msg.ffmpegPath, encoderId: msg.encoderId })
+            break
+        case "rtmpStop":
+            rtmpStopWatch.delete(msg.outputId)
+            RtmpStreamer.stop(msg.outputId)
+            break
+        case "rtmpStopAll":
+            rtmpStopWatch.clear()
+            RtmpStreamer.stopAll()
+            break
+        case "rtmpAudio":
+            RtmpStreamer.updateAudio(msg.outputId, Buffer.from(msg.buffer, msg.byteOffset, msg.byteLength), msg.sampleRate)
+            break
+        case "rtmpFrame":
+            RtmpStreamer.updateFrame(msg.outputId, Buffer.from(msg.buffer, msg.byteOffset, msg.byteLength), msg.size)
+            break
         case "create":
             void createSender(msg.id, msg.name, msg.groups)
             break

@@ -3,6 +3,7 @@ import { OUTPUT_CONSOLE, getMainWindow, hardwareAccelerationDisabled, isMac, loa
 import { OUTPUT } from "../../../types/Channels"
 import type { Output } from "../../../types/Output"
 import { BlackmagicSender } from "../../blackmagic/BlackmagicSender"
+import { RtmpBridge } from "../../streaming/RtmpBridge"
 import { gpuCompositingAvailable, gpuStateSettled } from "../../utils/gpu"
 import { initializeSender } from "../../blackmagic/bmdTalk"
 import { CaptureHelper } from "../../capture/CaptureHelper"
@@ -713,9 +714,17 @@ export class OutputLifecycle {
                 if (idx < 0) idx = targets.push({ width: sz.width, height: sz.height, format: f }) - 1
                 memberTarget[m] = idx
             }
+            // members streaming RTMP: the worker feeds ffmpeg a BGRA frame at exactly the broadcast size
+            const rtmpMembers: { [m: string]: { width: number; height: number } } = {}
+            for (const m of members) {
+                const cfg = RtmpBridge.runningConfig(m)
+                if (!cfg) continue
+                rtmpMembers[m] = { width: cfg.width, height: cfg.height }
+                if (!targets.some((t) => t.width === cfg.width && t.height === cfg.height && t.format === 0)) targets.push({ width: cfg.width, height: cfg.height, format: 0 })
+            }
             const cpuTargets = targets.length > 0 && !addon.targetsSupported
             const seq = ++offMainSeq
-            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets })) {
+            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, rtmpMembers })) {
                 forwardAt.set(seq, { t: Date.now(), unc: OutputLifecycle.globalInFlight === 0, px: width * height })
                 OutputLifecycle.globalInFlight++
                 offMainInFlight++
