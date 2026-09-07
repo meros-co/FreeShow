@@ -1,5 +1,5 @@
-// Runs in an Electron utilityProcess: owns every NDI/OMT receive loop, the frame packing and the
-// preview downscale, and posts frames straight to the renderers that draw them over MessagePorts.
+// Runs in an Electron utilityProcess: owns every NDI/OMT/Blackmagic receive loop, the frame packing
+// and the preview downscale, and hands frames straight to the renderers that draw them.
 //
 // Video must never touch the main thread. Receiving in the main process cost it ~15ms of event-loop
 // lag per 4K source (the IPC write alone is ~17ms per 8MB frame), which is what made the UI crawl
@@ -7,6 +7,9 @@
 // never sees a frame, and its lag stays around 1ms no matter how many 4K sources are running.
 
 import { ensureOmtCodecSearchPath } from "../omt/omtModule"
+import { getMacadam } from "../blackmagic/macadamLoader"
+import { InputImageBufferConverter } from "../blackmagic/ImageBufferConverter"
+import util from "../ndi/vingester-util"
 import { packStreamFrame, previewStreamFrame, type StreamFrame, type StreamFrameFormat } from "./streamFrames"
 
 const parentPort: any = (process as any).parentPort
@@ -809,6 +812,134 @@ class Omt {
     }
 }
 
+// ----- Blackmagic (DeckLink) input -----
+//
+// Main resolves the device (index, display mode and pixel format values) from its device list and sends
+// them here; the capture channel, the frame loop and the format handling all live in this process. 8-bit
+// YUV frames are UYVY and go to the windows as they are (the renderer converts on the GPU); the RGB
+// variants are swizzled to RGBA in place, as before.
+
+type BmdCaptureSpec = { deviceId: string; deviceIndex: number; displayMode: number; pixelFormat: number; pixelFormatName: string; audioChannels?: number }
+type BmdReceiver = { spec: BmdCaptureSpec; channel: any; running: boolean; stopped: boolean; loop: Promise<void> | null }
+
+class Bmd {
+    static receivers: { [deviceId: string]: BmdReceiver } = {}
+    static outputs: string[] = []
+
+    private static async open(spec: BmdCaptureSpec): Promise<BmdReceiver | null> {
+        const existing = this.receivers[spec.deviceId]
+        if (existing) return existing
+
+        const macadam = getMacadam()
+        if (!macadam) {
+            log("Blackmagic input unavailable: macadam module not loaded")
+            return null
+        }
+        const channel = await macadam.capture({
+            deviceIndex: spec.deviceIndex,
+            displayMode: spec.displayMode,
+            pixelFormat: spec.pixelFormat,
+            channels: spec.audioChannels ?? 2,
+            sampleRate: macadam.bmdAudioSampleRate48kHz,
+            sampleType: macadam.bmdAudioSampleType16bitInteger
+        })
+        const receiver: BmdReceiver = { spec, channel, running: false, stopped: false, loop: null }
+        this.receivers[spec.deviceId] = receiver
+        return receiver
+    }
+
+    private static pack(receiver: BmdReceiver, frame: any): StreamFrame | null {
+        const data: Buffer = frame?.video?.data
+        if (!data) return null
+        const width = receiver.channel.width
+        const height = receiver.channel.height
+        const name = receiver.spec.pixelFormatName || ""
+        const stride = frame.video.rowBytes || 0
+
+        let format: StreamFrameFormat = "rgba"
+        let pixels = data
+        if (name.includes("YUV")) {
+            if (name.includes("10") || name.includes("12")) {
+                pixels = InputImageBufferConverter.YUVtoRGBA(data, { width, height })
+                return packStreamFrame(pixels, width, height, 0, "rgba")
+            }
+            format = "uyvy"
+        } else if (name.includes("ARGB")) {
+            util.ImageBufferAdjustment.ARGBtoRGBA(pixels)
+        } else if (name.includes("BGRA")) {
+            format = "bgra"
+        } else if (name.includes("RGBXLE")) {
+            InputImageBufferConverter.RGBXLEtoRGBA(pixels)
+        } else if (name.includes("RGBLE")) {
+            pixels = InputImageBufferConverter.RGBLEtoRGBA(pixels)
+            return packStreamFrame(pixels, width, height, 0, "rgba")
+        } else if (name.includes("RGBX")) {
+            InputImageBufferConverter.RGBXtoRGBA(pixels)
+        } else if (name.includes("RGB")) {
+            pixels = InputImageBufferConverter.RGBtoRGBA(pixels)
+            return packStreamFrame(pixels, width, height, 0, "rgba")
+        }
+        return packStreamFrame(pixels, width, height, stride, format)
+    }
+
+    // one frame for the drawer card; the channel stays open so the next request is instant (as before)
+    static async thumbnail(spec: BmdCaptureSpec) {
+        const receiver = await this.open(spec)
+        if (!receiver || receiver.running) return
+        try {
+            const packed = this.pack(receiver, await receiver.channel.frame())
+            if (packed) sendFrame("BLACKMAGIC", spec.deviceId, [], packed)
+        } catch (err: any) {
+            log("Blackmagic frame error for " + spec.deviceId + ": " + err.message)
+            this.stop({ id: spec.deviceId })
+        }
+    }
+
+    static async capture(data: BmdCaptureSpec & { outputId: string }) {
+        if (!this.outputs.includes(data.outputId)) this.outputs.push(data.outputId)
+        const receiver = await this.open(data)
+        if (!receiver || receiver.running) return
+        receiver.running = true
+        receiver.loop = this.frameLoop(receiver).catch((err) => log("Blackmagic reception error for " + data.deviceId + ": " + err.message))
+    }
+
+    // the card paces this: frame() resolves when the next frame has arrived
+    private static async frameLoop(receiver: BmdReceiver) {
+        while (!receiver.stopped && this.receivers[receiver.spec.deviceId] === receiver) {
+            const frame = await receiver.channel.frame()
+            if (receiver.stopped) break
+            const packed = this.pack(receiver, frame)
+            if (packed) sendFrame("BLACKMAGIC", receiver.spec.deviceId, this.outputs, packed)
+        }
+    }
+
+    static stop(data: { id: string; outputId?: string } | null = null) {
+        if (data?.id) {
+            if (data.outputId) {
+                const index = this.outputs.indexOf(data.outputId)
+                if (index >= 0) this.outputs.splice(index, 1)
+            } else this.outputs = []
+
+            if (!this.outputs.length) this.close(data.id)
+            return
+        }
+        for (const id of Object.keys(this.receivers)) this.close(id)
+        this.outputs = []
+    }
+
+    private static close(deviceId: string) {
+        const receiver = this.receivers[deviceId]
+        if (!receiver) return
+        receiver.stopped = true
+        delete this.receivers[deviceId]
+        try {
+            receiver.channel.stop()
+        } catch (err: any) {
+            log("Error stopping Blackmagic receiver: " + err.message)
+        }
+    }
+}
+
 // ----- control channel -----
 
 const HANDLERS: { [type: string]: (data: any) => any } = {
@@ -819,7 +950,10 @@ const HANDLERS: { [type: string]: (data: any) => any } = {
     "omt:find": () => Omt.findStreams(),
     "omt:thumbnail": (data) => Omt.thumbnail(data),
     "omt:capture": (data) => Omt.capture(data),
-    "omt:stop": (data) => Omt.stop(data)
+    "omt:stop": (data) => Omt.stop(data),
+    "bmd:thumbnail": (data) => Bmd.thumbnail(data),
+    "bmd:capture": (data) => Bmd.capture(data),
+    "bmd:stop": (data) => Bmd.stop(data)
 }
 
 parentPort.on("message", async (e: any) => {

@@ -1,14 +1,12 @@
-<script lang="ts" context="module">
-    let streamInstances = 0
-</script>
-
 <script lang="ts">
     import { onDestroy, onMount } from "svelte"
     import { BLACKMAGIC } from "../../../../types/Channels"
     import { outputs } from "../../../stores"
-    import { destroy, receive, send } from "../../../utils/request"
+    import { send } from "../../../utils/request"
+    import { onStreamFrame } from "../../../utils/streamPort"
     import { findMatchingOut } from "../../helpers/output"
     import Card from "../Card.svelte"
+    import { StreamCanvasRenderer } from "./streamCanvas"
 
     interface Screen {
         id: string
@@ -22,7 +20,7 @@
     // whichever output happens to come first in the store, and this output would never receive any
     export let outputId = ""
 
-    let canvas: any
+    let canvas: HTMLCanvasElement | undefined
 
     onMount(() => {
         if (background) {
@@ -30,42 +28,23 @@
         } else send(BLACKMAGIC, ["RECEIVE_FRAME"], { source: screen })
     })
 
-    $: if (frame) setCanvas()
-    function setCanvas() {
-        if (!canvas) return
+    const renderer = new StreamCanvasRenderer()
+    $: if (frame && canvas) renderer.draw(canvas, frame)
 
-        let ctx = canvas.getContext("2d")
+    // frames come from the receive process over the stream transport (see streamPort.ts), not over IPC
+    const receiveStream = (data: { id: string; frame: any; time: number }) => {
+        if (data.id !== screen.id) return
+        loaded = true
 
-        const WIDTH = frame.width
-        const HEIGHT = frame.height
-        canvas.width = WIDTH
-        canvas.height = HEIGHT
-
-        const imageData = new ImageData(new Uint8ClampedArray(frame.data), WIDTH, HEIGHT)
-        ctx.putImageData(imageData, 0, 0)
+        // Take the newest frame rather than dropping by age: Svelte coalesces several arrivals in one
+        // tick into a single draw, so a burst never renders a backlog.
+        frame = data.frame
     }
 
-    const receiveBlackmagic: any = {
-        RECEIVE_STREAM: (data) => {
-            //  || data.frame?.type !== "frame"
-            if (data.id !== screen.id || !data.frame.video) return
-            loaded = true
-
-            // WIP play audio? (data.audio.data ...)
-
-            // Take the newest frame rather than dropping by age. Svelte coalesces several arrivals in
-            // one tick into a single draw, so a burst still never renders a backlog, while an absolute
-            // age cut discarded every 4K frame: 16MB takes longer than that to deliver on its own.
-            frame = data.frame.video
-        }
-    }
-
-    // the preload keeps one listener per id, so two components showing the same source must not share one
-    const receiverId = `${screen.id}#${++streamInstances}`
-
-    receive(BLACKMAGIC, receiveBlackmagic, receiverId)
+    const stopStream = onStreamFrame(BLACKMAGIC, receiveStream)
     onDestroy(() => {
-        destroy(BLACKMAGIC, receiverId)
+        renderer.destroy()
+        stopStream()
         if (background && !mirror) send(BLACKMAGIC, ["STOP_RECEIVER"], { id: screen.id, outputId: outputId || Object.keys($outputs)[0] })
     })
 
