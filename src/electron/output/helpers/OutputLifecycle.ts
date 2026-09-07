@@ -720,7 +720,7 @@ export class OutputLifecycle {
                 const cfg = RtmpBridge.runningConfig(m)
                 if (!cfg) continue
                 rtmpMembers[m] = { width: cfg.width, height: cfg.height }
-                if (!targets.some((t) => t.width === cfg.width && t.height === cfg.height && t.format === 0)) targets.push({ width: cfg.width, height: cfg.height, format: 0 })
+                if (!targets.some((t) => t.width === cfg.width && t.height === cfg.height && t.format === 4)) targets.push({ width: cfg.width, height: cfg.height, format: 4 })
             }
             const cpuTargets = targets.length > 0 && !addon.targetsSupported
             const seq = ++offMainSeq

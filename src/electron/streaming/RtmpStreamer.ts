@@ -76,6 +76,8 @@ interface StreamInstance {
     encoder: ChildProcess | null
     /** actual size of the raw frames, learned from the first captured frame */
     inputSize: { width: number; height: number } | null
+    /** pixel format of the raw frames (bgra 4 B/px, yuv420p 1.5 B/px); the encoder is declared with it */
+    inputPixFmt?: "bgra" | "yuv420p"
     sampleRate?: number
     encoderStartedAt: number
     encoderBackoffMs: number
@@ -263,7 +265,8 @@ export class RtmpStreamer {
             fps: config.fps,
             bitrate: config.bitrate,
             enableAudio: config.enableAudio,
-            sampleRate: streamer.sampleRate || SAMPLE_RATE
+            sampleRate: streamer.sampleRate || SAMPLE_RATE,
+            inputPixelFormat: streamer.inputPixFmt || "bgra"
         })
 
         const scaling = inputSize.width !== config.width || inputSize.height !== config.height
@@ -625,7 +628,11 @@ export class RtmpStreamer {
 
     // The frame is BORROWED: the caller keeps it untouched until `release` is called (when a newer frame
     // replaces it or the stream stops), so no copy is made here. Omit `release` for an owned buffer.
-    static updateFrame(outputId: string, buffer: Buffer, size: { width: number; height: number }, release?: () => void) {
+    static frameBytes(size: { width: number; height: number }, pixFmt: "bgra" | "yuv420p"): number {
+        return pixFmt === "yuv420p" ? size.width * size.height + 2 * (Math.floor(size.width / 2) * Math.floor(size.height / 2)) : size.width * size.height * 4
+    }
+
+    static updateFrame(outputId: string, buffer: Buffer, size: { width: number; height: number }, release?: () => void, pixFmt: "bgra" | "yuv420p" = "bgra") {
         const streamer = this.streamers.get(outputId)
         if (!streamer) {
             release?.()
@@ -634,9 +641,9 @@ export class RtmpStreamer {
 
         // -f rawvideo has no framing, so a buffer that disagrees with the declared -video_size would
         // silently shear the broadcast diagonally rather than fail
-        const expected = size.width * size.height * 4
+        const expected = this.frameBytes(size, pixFmt)
         if (buffer.length !== expected) {
-            console.error(`[RtmpStreamer] Dropping frame for ${outputId}: got ${buffer.length} bytes, expected ${expected} for ${size.width}x${size.height}`)
+            console.error(`[RtmpStreamer] Dropping frame for ${outputId}: got ${buffer.length} bytes, expected ${expected} for ${size.width}x${size.height} ${pixFmt}`)
             release?.()
             return
         }
@@ -654,6 +661,7 @@ export class RtmpStreamer {
             // an encoder restart is already scheduled; do not race it
             if (streamer.encoderRestartTimer) return
 
+            streamer.inputPixFmt = pixFmt
             this.spawnEncoder(streamer, size)
             if (streamer.encoder) {
                 for (const relay of streamer.relays.values()) this.spawnRelay(streamer, relay)
@@ -661,9 +669,10 @@ export class RtmpStreamer {
             return
         }
 
-        // the capture resolution changed under us, so the encoder's -video_size no longer matches
-        if (streamer.inputSize && (streamer.inputSize.width !== size.width || streamer.inputSize.height !== size.height)) {
-            console.log(`[RtmpStreamer] Capture size changed to ${size.width}x${size.height}, restarting encoder`)
+        // the capture resolution or pixel format changed under us, so the encoder's input declaration no longer matches
+        if (streamer.inputSize && (streamer.inputSize.width !== size.width || streamer.inputSize.height !== size.height || (streamer.inputPixFmt || "bgra") !== pixFmt)) {
+            console.log(`[RtmpStreamer] Capture input changed to ${size.width}x${size.height} ${pixFmt}, restarting encoder`)
+            streamer.inputPixFmt = pixFmt
             this.respawnEncoder(streamer, size, "Resolution changed")
         }
     }

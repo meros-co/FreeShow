@@ -601,6 +601,45 @@ function releasePacerRef(pb: PacerBuf) {
     if (pool && !pool.includes(pb.buf)) pool.push(pb.buf)
 }
 
+// BGRA -> planar I420 (BT.601 limited range), the CPU path for platforms whose GPU readback has no I420 target
+function bgraToI420(bgra: Buffer, w: number, h: number): Buffer {
+    const cw = Math.floor(w / 2)
+    const ch = Math.floor(h / 2)
+    const out = Buffer.allocUnsafe(w * h + 2 * cw * ch)
+    const uOff = w * h
+    const vOff = uOff + cw * ch
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+            const i = (y * w + x) * 4
+            const b = bgra[i]
+            const g = bgra[i + 1]
+            const r = bgra[i + 2]
+            out[y * w + x] = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16
+        }
+    }
+    for (let cy = 0; cy < ch; cy++) {
+        for (let cx = 0; cx < cw; cx++) {
+            let r = 0
+            let g = 0
+            let b = 0
+            for (let dy = 0; dy < 2; dy++) {
+                for (let dx = 0; dx < 2; dx++) {
+                    const i = ((cy * 2 + dy) * w + cx * 2 + dx) * 4
+                    b += bgra[i]
+                    g += bgra[i + 1]
+                    r += bgra[i + 2]
+                }
+            }
+            r >>= 2
+            g >>= 2
+            b >>= 2
+            out[uOff + cy * cw + cx] = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128
+            out[vOff + cy * cw + cx] = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128
+        }
+    }
+    return out
+}
+
 function startPacer(reg: { [id: string]: Sender }, id: string) {
     const s = reg[id]
     if (!s || s.paceTimer) return
@@ -732,7 +771,7 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
     // buffers: the addon writes straight into them and no frame is copied here on the GPU path.
     const targets = opts.targets || []
     const mainFormat = opts.mainFormat ?? format
-    const bytesFor = (w: number, h: number, f: number) => (f === 1 ? w * h * 2 : f === 2 ? w * h * 3 : w * h * 4)
+    const bytesFor = (w: number, h: number, f: number) => (f === 1 ? w * h * 2 : f === 2 ? w * h * 3 : f === 4 ? w * h + 2 * (Math.floor(w / 2) * Math.floor(h / 2)) : w * h * 4)
     const gpuTargets = twoPhase && targets.length > 0 && !opts.cpuTargets && !!osr.targetsSupported
     const framePbuf = twoPhase ? acquirePacerBuf(id, bytesFor(size.width, size.height, format)) : null
     const targetPbufs: PacerBuf[] = gpuTargets ? targets.map((t, i) => acquirePacerBuf(`${id}#t${i}`, bytesFor(t.width, t.height, t.format))) : []
@@ -791,6 +830,7 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
         const convertBgra = (bgra: Buffer, w: number, h: number, f: number): Buffer => {
             if (f === 2) return osr.convertBgraToUyva ? osr.convertBgraToUyva(bgra, w, h) : bgraToUyva(bgra, w, h)
             if (f === 1) return osr.convertBgraToUyvy ? osr.convertBgraToUyvy(bgra, w, h) : bgraToUyvy(bgra, w, h)
+            if (f === 4) return bgraToI420(bgra, w, h)
             return bgra
         }
         const intoPacerBuf = (owner: string, data: Buffer): PacerBuf => {
@@ -890,17 +930,19 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
                 }
             }
         }
-        // RTMP: ffmpeg wants BGRA at the broadcast size. The engine borrows the pacer buffer (one ref) and
-        // releases it when a newer frame replaces it, so no copy is made on this thread
+        // RTMP: ffmpeg takes a planar I420 frame at the broadcast size (1.5 bytes/px, no swscale in the
+        // encoder). The engine borrows the pacer buffer (one ref) and releases it when a newer frame
+        // replaces it, so no copy is made on this thread
         for (const m of rtmpMembers) {
             const want = opts.rtmpMembers![m]
-            const ti = targetBufs.findIndex((t) => t.width === want.width && t.height === want.height && t.format === 0)
+            const ti = targetBufs.findIndex((t) => t.width === want.width && t.height === want.height && (t.format === 4 || t.format === 0))
             const b = ti >= 0 ? targetBufs[ti] : main.format === 0 && main.width === want.width && main.height === want.height ? main : null
             if (!b) continue
             const pb = b.pbuf
+            const bytes = bytesFor(b.width, b.height, b.format)
             pb.refs++
             queued.add(pb)
-            RtmpStreamer.updateFrame(m, pb.buf.length === b.width * b.height * 4 ? pb.buf : pb.buf.subarray(0, b.width * b.height * 4), { width: b.width, height: b.height }, () => releasePacerRef(pb))
+            RtmpStreamer.updateFrame(m, pb.buf.length === bytes ? pb.buf : pb.buf.subarray(0, bytes), { width: b.width, height: b.height }, () => releasePacerRef(pb), b.format === 4 ? "yuv420p" : "bgra")
         }
         loopDiag.fanMs += performance.now() - tFan
         if (tl) tl.enq = Date.now() // pacer enqueue complete (memcpy + fan-out done) — nonzero = clean path
