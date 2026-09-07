@@ -11,6 +11,128 @@ import { packStreamFrame, previewStreamFrame, type StreamFrame, type StreamFrame
 
 const parentPort: any = (process as any).parentPort
 
+// ----- frame transport: a loopback WebSocket from this process straight into the drawing window -----
+//
+// A MessagePort clone of a 16MB frame cost ~30ms to serialize here and ~30ms to deserialize in the
+// renderer (Mojo chunks it), which capped 4K delivery at 12-14fps; a binary WebSocket message took
+// Chromium ~110ms to hand to the page. So full-size frames go through shared memory instead: this
+// process writes each frame into a slot of a ring the window has mapped too (osr-capture shmMap), and the
+// socket carries only a small header naming the slot, plus the window's ack that frees it. The app
+// window's small preview frames still travel as binary messages. Main is never in the path: it only
+// tells a window the port and the token.
+import http from "http"
+import { randomBytes } from "crypto"
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { WebSocketServer } = require("ws")
+let shmModule: any = null
+try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    shmModule = require("osr-capture")
+    if (typeof shmModule?.shmMap !== "function") shmModule = null
+} catch {
+    shmModule = null
+}
+
+// slots per window: enough that a frame can be written while the previous ones are still being read
+const SHM_SLOTS = 3
+
+// Frame buffers are pooled and reference counted: the OMT receiver decodes straight into a pooled
+// buffer (receive(..., into)), each window that still needs the frame (waiting, or being copied into
+// shared memory on the thread pool) holds a reference, and the buffer goes back to the pool when the
+// last one lets go. No frame is copied on this thread; a fresh 16MB buffer per frame cost more in page
+// faults than the copy itself.
+const pooled = new Map<Buffer, number>()
+const freeBuffers: Buffer[] = []
+function acquireBuffer(bytes: number): Buffer {
+    const i = freeBuffers.findIndex((b) => b.length >= bytes)
+    const buf = i >= 0 ? freeBuffers.splice(i, 1)[0] : Buffer.allocUnsafeSlow(bytes)
+    pooled.set(buf, 1)
+    return buf
+}
+function poolBufferOf(data: Buffer): Buffer | null {
+    for (const b of pooled.keys()) if (b.buffer === data.buffer) return b
+    return null
+}
+function holdFrame(frame: StreamFrame) {
+    const b = poolBufferOf(frame.data)
+    if (b) pooled.set(b, (pooled.get(b) || 0) + 1)
+}
+function releaseFrame(frame: StreamFrame) {
+    const b = poolBufferOf(frame.data)
+    if (!b) return
+    const n = (pooled.get(b) || 1) - 1
+    if (n > 0) {
+        pooled.set(b, n)
+        return
+    }
+    pooled.delete(b)
+    freeBuffers.push(b)
+}
+let shmSeq = 0
+type ShmRing = { name: string; slotBytes: number; slots: number; busy: boolean[]; announced: boolean }
+function createRing(slotBytes: number): ShmRing | null {
+    if (!shmModule) return null
+    const name = `fs-${process.pid}-${++shmSeq}`
+    try {
+        shmModule.shmMap(name, slotBytes * SHM_SLOTS, true)
+        return { name, slotBytes, slots: SHM_SLOTS, busy: new Array(SHM_SLOTS).fill(false), announced: false }
+    } catch (err: any) {
+        log("shared memory unavailable: " + err?.message)
+        shmModule = null
+        return null
+    }
+}
+function dropRing(ring: ShmRing | null | undefined) {
+    if (!ring) return
+    try {
+        shmModule?.shmUnmap(ring.name)
+    } catch {}
+}
+const wsToken = randomBytes(24).toString("hex")
+let wsPort = 0
+const wsServer = http.createServer((_req, res) => {
+    res.statusCode = 404
+    res.end()
+})
+const wss = new WebSocketServer({ server: wsServer, perMessageDeflate: false })
+wsServer.listen(0, "127.0.0.1", () => {
+    const address = wsServer.address()
+    wsPort = typeof address === "object" && address ? address.port : 0
+    toMain({ type: "wsInfo", port: wsPort, token: wsToken })
+})
+wss.on("connection", (ws: any) => {
+    let targetId = ""
+    ws.on("message", (raw: any, isBinary: boolean) => {
+        if (isBinary) return
+        const text = raw.toString()
+        if (!targetId) {
+            // handshake: { token, targetId, shm }: shm = the window can map shared memory
+            let hello: any = null
+            try {
+                hello = JSON.parse(text)
+            } catch {
+                hello = null
+            }
+            if (!hello || hello.token !== wsToken || typeof hello.targetId !== "string") {
+                ws.close()
+                return
+            }
+            targetId = hello.targetId
+            if (process.env.FS_CAP_STATS) log(`window ${targetId} connected, shared memory: ${!!hello.shm && !!shmModule} (window ${!!hello.shm}, here ${!!shmModule})`)
+            requestedPorts.delete(targetId)
+            if (subscribers[targetId]?.ws !== ws) dropSubscriber(targetId)
+            subscribers[targetId] = { ws, inFlight: 0, sentAt: [], roundTrips: [], pending: null, roundTrip: 0, frameInterval: 0, lastFrameAt: 0, wantsShm: !!hello.shm && !!shmModule, ring: null }
+            return
+        }
+        if (text === "1") onAck(targetId, -1)
+        else if (text.startsWith("1:")) onAck(targetId, Number(text.slice(2)))
+    })
+    ws.on("close", () => {
+        if (targetId && subscribers[targetId]?.ws === ws) dropSubscriber(targetId)
+    })
+    ws.on("error", () => {})
+})
+
 // ----- transport -----
 
 // the app window draws previews a few hundred pixels wide
@@ -25,13 +147,16 @@ const APP_TARGET = "app"
 // the main process (see StreamReceiverHost), so no timeout is needed to notice one either.
 type Pending = { ipcChannel: string; id: string; frame: StreamFrame; time: number }
 type Subscriber = {
-    port: any
+    ws: any
     inFlight: number
     sentAt: number[]
+    roundTrips: number[] // recent post->ack samples, ms
     pending: Pending | null
-    roundTrip: number // measured post->ack, ms (smoothed)
+    roundTrip: number // the window's round trip when it is keeping up: the minimum of the recent samples
     frameInterval: number // measured arrival spacing, ms (smoothed)
     lastFrameAt: number
+    wantsShm: boolean
+    ring: ShmRing | null
 }
 
 // smoothing weight for the two measurements above; a weight, not a machine-dependent threshold
@@ -41,12 +166,41 @@ function smooth(previous: number, sample: number) {
     return previous ? previous + (sample - previous) * SMOOTHING : sample
 }
 
+// How many frames to keep in flight so the window is never idle: round trip / frame interval. The
+// round trip used is the best recent one, not the average: a window that falls behind reports longer
+// and longer round trips, and sizing the depth on those would feed the backlog that caused them.
+// One more than the round trip needs, so the next frame is already there when the window finishes
+// the current one (frames arrive in bursts; one in flight alone left the window idle between them).
+const ROUND_TRIP_SAMPLES = 32
 function allowedInFlight(subscriber: Subscriber) {
     if (!subscriber.roundTrip || !subscriber.frameInterval) return 1
-    return Math.max(1, Math.ceil(subscriber.roundTrip / subscriber.frameInterval))
+    const depth = Math.ceil(subscriber.roundTrip / subscriber.frameInterval) + 1
+    return subscriber.ring ? Math.min(depth, subscriber.ring.slots) : depth
 }
 const subscribers: { [targetId: string]: Subscriber } = {}
 const requestedPorts = new Set<string>()
+
+// FS_CAP_STATS: per-window delivery, once a second. acked = frames the window took (it acks after
+// dispatching the frame to its drawing components), so acked/s is the rate the window actually drew.
+const rxStats: { [targetId: string]: { offered: number; posted: number; acked: number; replaced: number } } = {}
+function rxStat(targetId: string) {
+    return (rxStats[targetId] ||= { offered: 0, posted: 0, acked: 0, replaced: 0 })
+}
+const loopStats = { frames: 0, empty: 0, recvMs: 0, sendMs: 0, shmMs: 0, previewMs: 0 }
+if (process.env.FS_CAP_STATS) {
+    setInterval(() => {
+        if (loopStats.frames || loopStats.empty) {
+            log(`[RX-LOOP] frames=${loopStats.frames} empty=${loopStats.empty} recv=${loopStats.recvMs.toFixed(0)}ms send=${loopStats.sendMs.toFixed(0)}ms (shm=${loopStats.shmMs.toFixed(0)}ms preview=${loopStats.previewMs.toFixed(0)}ms)`)
+            loopStats.frames = loopStats.empty = loopStats.recvMs = loopStats.sendMs = loopStats.shmMs = loopStats.previewMs = 0
+        }
+        for (const [targetId, st] of Object.entries(rxStats)) {
+            const sub = subscribers[targetId]
+            if (!st.offered && !st.acked) continue
+            log(`[RX-STATS ${targetId}] offered=${st.offered} posted=${st.posted} acked=${st.acked} replaced=${st.replaced} inFlight=${sub?.inFlight ?? 0}/${sub ? allowedInFlight(sub) : 0} rtt=${sub ? Math.round(sub.roundTrip) : 0}ms interval=${sub ? Math.round(sub.frameInterval) : 0}ms`)
+            st.offered = st.posted = st.acked = st.replaced = 0
+        }
+    }, 1000)
+}
 
 function toMain(message: any) {
     parentPort?.postMessage(message)
@@ -64,9 +218,6 @@ function needPort(targetId: string, preview: boolean) {
     toMain({ type: "needPort", targetId, preview })
 }
 
-// Frames are structured-cloned rather than transferred: a MessagePortMain transfer list only accepts
-// ports, and the copy happens here, off the main thread, which is the whole point.
-//
 // Sending faster than a window draws only grows a backlog, and the frames then arrive later and
 // later, which looks like a stall rather than a dropped frame. So one frame is in flight at a time
 // and the newest replaces whatever was waiting: live video wants the newest frame, not every frame.
@@ -77,7 +228,13 @@ function deliver(targetId: string, ipcChannel: string, id: string, frame: Stream
     if (subscriber.lastFrameAt) subscriber.frameInterval = smooth(subscriber.frameInterval, time - subscriber.lastFrameAt)
     subscriber.lastFrameAt = time
 
-    if (subscriber.inFlight >= allowedInFlight(subscriber)) {
+    rxStat(targetId).offered++
+    holdFrame(frame)
+    if (!canPost(subscriber)) {
+        if (subscriber.pending) {
+            rxStat(targetId).replaced++
+            releaseFrame(subscriber.pending.frame)
+        }
         subscriber.pending = { ipcChannel, id, frame, time }
         return
     }
@@ -85,31 +242,100 @@ function deliver(targetId: string, ipcChannel: string, id: string, frame: Stream
     post(targetId, subscriber, { ipcChannel, id, frame, time })
 }
 
+// Shared memory: the frame is copied into a free ring slot and the header names the slot. Otherwise
+// two WebSocket messages per frame: the header, then the pixels as one binary message.
+function freeSlot(ring: ShmRing) {
+    return ring.busy.indexOf(false)
+}
+function canPost(subscriber: Subscriber) {
+    if (subscriber.inFlight >= allowedInFlight(subscriber)) return false
+    return !subscriber.ring || freeSlot(subscriber.ring) >= 0 || subscriber.ring.slotBytes < (subscriber.pending?.frame.data.length || 0)
+}
 function post(targetId: string, subscriber: Subscriber, next: Pending) {
     try {
+        const header: any = { ipcChannel: next.ipcChannel, id: next.id, time: next.time, xres: next.frame.xres, yres: next.frame.yres, format: next.frame.format }
+        if (subscriber.wantsShm) {
+            const bytes = next.frame.data.length
+            if (!subscriber.ring || subscriber.ring.slotBytes < bytes) {
+                // a ring for this frame size; the window maps the new one and lets go of the old
+                dropRing(subscriber.ring)
+                subscriber.ring = createRing(bytes)
+                if (!subscriber.ring) subscriber.wantsShm = false
+            }
+            const ring = subscriber.ring
+            if (ring) {
+                const slot = freeSlot(ring)
+                if (slot < 0) {
+                    subscriber.pending = next
+                    return
+                }
+                ring.busy[slot] = true
+                header.slot = slot
+                header.bytes = bytes
+                if (!ring.announced) {
+                    header.shm = { name: ring.name, slotBytes: ring.slotBytes, slots: ring.slots }
+                    ring.announced = true
+                }
+                subscriber.inFlight++
+                rxStat(targetId).posted++
+                subscriber.sentAt.push(Date.now())
+                // the copy runs on the thread pool; the header goes out once the slot holds the frame
+                const tShm = performance.now()
+                const ws = subscriber.ws
+                shmModule.shmWriteAsync(ring.name, slot * ring.slotBytes, next.frame.data).then(
+                    () => {
+                        loopStats.shmMs += performance.now() - tShm
+                        releaseFrame(next.frame)
+                        if (subscribers[targetId]?.ws === ws) ws.send(JSON.stringify(header))
+                    },
+                    () => {
+                        releaseFrame(next.frame)
+                        if (subscribers[targetId]?.ws === ws) onAck(targetId, slot)
+                    }
+                )
+                return
+            }
+        }
         subscriber.inFlight++
+        rxStat(targetId).posted++
         subscriber.sentAt.push(Date.now())
-        subscriber.port.postMessage({
-            ipcChannel: next.ipcChannel,
-            args: { channel: "RECEIVE_STREAM", data: { id: next.id, frame: next.frame, time: next.time } }
-        })
+        subscriber.ws.send(JSON.stringify(header))
+        subscriber.ws.send(next.frame.data, { binary: true }, () => releaseFrame(next.frame))
     } catch {
-        delete subscribers[targetId]
-        requestedPorts.delete(targetId)
+        releaseFrame(next.frame)
+        dropSubscriber(targetId)
     }
 }
 
+function dropSubscriber(targetId: string) {
+    const sub = subscribers[targetId]
+    if (!sub) return
+    if (sub.pending) releaseFrame(sub.pending.frame)
+    dropRing(sub.ring)
+    try {
+        sub.ws?.close()
+    } catch {}
+    delete subscribers[targetId]
+    requestedPorts.delete(targetId)
+}
+
 // the window took a frame: measure the round trip, then send whatever arrived meanwhile, newest only
-function onAck(targetId: string) {
+function onAck(targetId: string, slot: number) {
     const subscriber = subscribers[targetId]
     if (!subscriber) return
+    rxStat(targetId).acked++
+    if (slot >= 0 && subscriber.ring && slot < subscriber.ring.slots) subscriber.ring.busy[slot] = false
 
     subscriber.inFlight = Math.max(0, subscriber.inFlight - 1)
     const sentAt = subscriber.sentAt.shift()
-    if (sentAt) subscriber.roundTrip = smooth(subscriber.roundTrip, Date.now() - sentAt)
+    if (sentAt) {
+        subscriber.roundTrips.push(Date.now() - sentAt)
+        if (subscriber.roundTrips.length > ROUND_TRIP_SAMPLES) subscriber.roundTrips.shift()
+        subscriber.roundTrip = Math.min(...subscriber.roundTrips)
+    }
 
     const next = subscriber.pending
-    if (!next || subscriber.inFlight >= allowedInFlight(subscriber)) return
+    if (!next || !canPost(subscriber)) return
 
     subscriber.pending = null
     post(targetId, subscriber, next)
@@ -125,9 +351,16 @@ function sendFrame(ipcChannel: string, id: string, outputIds: string[], packed: 
         needPort(outputId, false)
         deliver(outputId, ipcChannel, id, packed, time)
     })
+    // the receiver's own hold (acquireBuffer) ends here; windows that took the frame keep theirs
+    releaseFrame(packed)
 
     needPort(APP_TARGET, true)
-    if (subscribers[APP_TARGET]) deliver(APP_TARGET, ipcChannel, id, previewStreamFrame(packed, PREVIEW_MAX_WIDTH), time)
+    if (subscribers[APP_TARGET]) {
+        const tPreview = performance.now()
+        const preview = previewStreamFrame(packed, PREVIEW_MAX_WIDTH)
+        loopStats.previewMs += performance.now() - tPreview
+        deliver(APP_TARGET, ipcChannel, id, preview, time)
+    }
 }
 
 type ReceiverState = {
@@ -376,6 +609,7 @@ async function loadOmt() {
 type OmtLoop = {
     source: any
     lowbandwidth: boolean
+    frameBytes: number
     stopped: boolean
     receiver: any
     done: Promise<void>
@@ -453,7 +687,7 @@ class Omt {
     }
 
     private static startLoop(source: any, lowbandwidth: boolean, delayMs: number) {
-        const loop: OmtLoop = { source, lowbandwidth, stopped: false, receiver: null, done: Promise.resolve(), wake: null }
+        const loop: OmtLoop = { source, lowbandwidth, frameBytes: 0, stopped: false, receiver: null, done: Promise.resolve(), wake: null }
         this.loops[source.id] = loop
         loop.done = this.frameLoop(source.id, loop, delayMs).catch((err) => log("OMT reception error for " + source.id + ": " + err.message))
     }
@@ -491,12 +725,26 @@ class Omt {
                         if (loop.stopped) break
                     }
 
-                    const frame = await loop.receiver.receive(this.RECEIVE_TIMEOUT_MS, 2 /* Video */)
+                    // decode into a pooled buffer sized from the last frame (a bigger frame arrives in
+                    // its own buffer, which sizes the next one); sendBuffer takes over the hold
+                    const into = loop.lowbandwidth || !loop.frameBytes ? null : acquireBuffer(loop.frameBytes)
+                    const tRecv = performance.now()
+                    let frame: any = null
+                    try {
+                        frame = await loop.receiver.receive(this.RECEIVE_TIMEOUT_MS, 2 /* Video */, into || undefined)
+                    } finally {
+                        if (into && !(frame?.data && frame.data.buffer === into.buffer)) releaseFrame({ data: into } as StreamFrame)
+                    }
+                    const tGot = performance.now()
+                    loopStats.recvMs += tGot - tRecv
                     if (loop.stopped) break
                     if (frame?.data) {
+                        loopStats.frames++
+                        loop.frameBytes = Math.max(loop.frameBytes, frame.data.length)
                         this.sendBuffer(sourceId, frame)
+                        loopStats.sendMs += performance.now() - tGot
                         consecutiveErrors = 0
-                    }
+                    } else loopStats.empty++
 
                     // receive() already blocks until the next frame, so pace on the source rather than a timer.
                     // Idle (no frame) still backs off, and thumbnails keep their slow rate.
@@ -578,18 +826,8 @@ parentPort.on("message", async (e: any) => {
     const message = e.data
     if (!message) return
 
-    if (message.type === "port") {
-        const port = e.ports?.[0]
-        if (!port) return
-        requestedPorts.delete(message.targetId)
-        subscribers[message.targetId] = { port, inFlight: 0, sentAt: [], pending: null, roundTrip: 0, frameInterval: 0, lastFrameAt: 0 }
-        port.on("message", () => onAck(message.targetId))
-        port.start()
-        return
-    }
-
     if (message.type === "dropPort") {
-        delete subscribers[message.targetId]
+        dropSubscriber(message.targetId)
         requestedPorts.delete(message.targetId)
         return
     }
