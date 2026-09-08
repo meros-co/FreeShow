@@ -6,6 +6,7 @@
     import { findMatchingOut } from "../../helpers/output"
     import Card from "../Card.svelte"
     import { StreamCanvasRenderer } from "./streamCanvas"
+    import { StreamLayer } from "./streamLayer"
     import { onStreamFrame } from "../../../utils/streamPort"
     import SelectElem from "../../system/SelectElem.svelte"
 
@@ -30,7 +31,13 @@
     })
 
     const renderer = new StreamCanvasRenderer()
-    $: if (frame && canvas) renderer.draw(canvas, frame)
+    // a full-cover background on a captured output is composited by the worker instead (see streamLayer)
+    const layer = new StreamLayer(background && !mirror ? outputId || Object.keys($outputs)[0] : "", () => (composited = layer.composited))
+    let composited = false
+    $: if (frame && canvas) {
+        layer.update(canvas, frame.xres, frame.yres)
+        if (!composited) renderer.draw(canvas, frame)
+    }
 
     const receiveStream = (data: { id: string; frame: any; time: number }) => {
         if (data.id !== screen.id) return
@@ -44,6 +51,7 @@
 
     const stopStream = onStreamFrame(NDI, receiveStream)
     onDestroy(() => {
+        layer.destroy()
         renderer.destroy()
         stopStream()
         if (background && !mirror) send(NDI, ["CAPTURE_DESTROY"], { id: screen.id, outputId: outputId || Object.keys($outputs)[0] })
@@ -53,7 +61,8 @@
 </script>
 
 {#if background}
-    <canvas bind:this={canvas} />
+    <!-- while the worker composites this stream into the capture, the canvas must not paint over it -->
+    <canvas bind:this={canvas} style={composited ? "visibility: hidden;" : ""} />
 {:else}
     <!-- class="context #screen_card" -->
     <Card outlineColor={findMatchingOut(screen.id, $outputs)} active={findMatchingOut(screen.id, $outputs) !== null} on:click title={screen.name} label={screen.name} {loaded} icon="ndi" white showPlayOnHover>

@@ -1159,8 +1159,8 @@ function connectVideoSource(targetId: string, outputId: string, wsPort: number, 
                 state.ring = null
             }
         }
-        // UYVY composites as it is; BGRA too. Anything else stays with the page's own draw.
-        const format = header.format === "uyvy" ? 1 : header.format === "bgra" ? 0 : -1
+        // every format the receive process produces composites; anything else stays with the page's draw
+        const format = header.format === "uyvy" ? 1 : header.format === "bgra" ? 0 : header.format === "rgba" ? 3 : -1
         if (!state.ring || format < 0) return done()
 
         let slot = state.bufs.find((b) => !b.inUse && b.buf.length >= header.bytes)

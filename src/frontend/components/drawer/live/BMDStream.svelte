@@ -7,6 +7,7 @@
     import { findMatchingOut } from "../../helpers/output"
     import Card from "../Card.svelte"
     import { StreamCanvasRenderer } from "./streamCanvas"
+    import { StreamLayer } from "./streamLayer"
 
     interface Screen {
         id: string
@@ -29,7 +30,13 @@
     })
 
     const renderer = new StreamCanvasRenderer()
-    $: if (frame && canvas) renderer.draw(canvas, frame)
+    // a full-cover background on a captured output is composited by the worker instead (see streamLayer)
+    const layer = new StreamLayer(background && !mirror ? outputId || Object.keys($outputs)[0] : "", () => (composited = layer.composited))
+    let composited = false
+    $: if (frame && canvas) {
+        layer.update(canvas, frame.xres, frame.yres)
+        if (!composited) renderer.draw(canvas, frame)
+    }
 
     // frames come from the receive process over the stream transport (see streamPort.ts), not over IPC
     const receiveStream = (data: { id: string; frame: any; time: number }) => {
@@ -43,6 +50,7 @@
 
     const stopStream = onStreamFrame(BLACKMAGIC, receiveStream)
     onDestroy(() => {
+        layer.destroy()
         renderer.destroy()
         stopStream()
         if (background && !mirror) send(BLACKMAGIC, ["STOP_RECEIVER"], { id: screen.id, outputId: outputId || Object.keys($outputs)[0] })
@@ -52,7 +60,8 @@
 </script>
 
 {#if background}
-    <canvas bind:this={canvas} />
+    <!-- while the worker composites this stream into the capture, the canvas must not paint over it -->
+    <canvas bind:this={canvas} style={composited ? "visibility: hidden;" : ""} />
 {:else}
     <Card outlineColor={findMatchingOut(screen.id, $outputs)} active={findMatchingOut(screen.id, $outputs) !== null} on:click label={screen.name} {loaded} icon="blackmagic" white showPlayOnHover>
         <canvas bind:this={canvas} />
