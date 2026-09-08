@@ -84,6 +84,8 @@ export class NdiSender {
     static bmdMessageHandler: ((msg: any) => void) | null = null
     // WebRTC host wiring (`webrtc*` messages from the worker's frame server)
     static webrtcMessageHandler: ((msg: any) => void) | null = null
+    // live input composited into a capture (`video*` messages)
+    static videoLayerHandler: ((msg: any) => void) | null = null
 
     private static onWorkerMessage(msg: any) {
         const t0 = process.env.FS_CAP_STATS ? performance.now() : 0
@@ -115,6 +117,10 @@ export class NdiSender {
         }
         if (String(msg.type).startsWith("webrtc")) {
             this.webrtcMessageHandler?.(msg)
+            return
+        }
+        if (msg.type === "videoFrame" || msg.type === "videoLayerActive") {
+            this.videoLayerHandler?.(msg)
             return
         }
         if (String(msg.type).endsWith("Omt")) {

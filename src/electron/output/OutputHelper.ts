@@ -33,6 +33,7 @@ export class OutputHelper {
             TO_FRONT: (data: string) => OutputHelper.Bounds.moveToFront(data),
 
             REQUEST_PREVIEW: (data: { id: string; previewId: string }) => CaptureHelper.Transmitter.requestPreview(data),
+            STREAM_LAYER: (data: { id: string; active: boolean }) => OutputLifecycle.requestVideoLayer(data.id, !!data.active),
             PREVIEW_SUBSCRIBE: (data: { id: string; subscriber?: string; width?: number }) => PreviewStream.subscribe(data.id, data.subscriber, data.width),
             PREVIEW_UNSUBSCRIBE: (data: { id: string; subscriber?: string }) => PreviewStream.unsubscribe(data.id, data.subscriber),
             PREVIEW_SIZE: (data: { id: string; subscriber: string; width: number }) => PreviewStream.setWidth(data.id, data.subscriber, data.width),

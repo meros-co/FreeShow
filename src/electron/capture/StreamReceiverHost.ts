@@ -8,6 +8,7 @@
 import { utilityProcess, type BrowserWindow } from "electron"
 import { join } from "path"
 import { getMainWindow } from ".."
+import { NdiSender } from "../ndi/NdiSender"
 import { OutputHelper } from "../output/OutputHelper"
 
 const APP_TARGET = "app"
@@ -85,6 +86,18 @@ export class StreamReceiverHost {
     // One channel per window: the child keeps its end, the window gets the other, and from then on
     // frames travel between those two processes without the main process in the middle.
     private static wirePort(targetId: string) {
+        // the capture worker subscribes to an output's stream to composite it into that output's capture
+        if (targetId.startsWith("worker:")) {
+            const worker = NdiSender.getSharedWorker()
+            if (!worker || !this.wsInfo) {
+                if (this.wsInfo) this.child?.postMessage({ type: "dropPort", targetId })
+                else this.awaitingWs.add(targetId)
+                return
+            }
+            worker.postMessage({ type: "videoSource", targetId, outputId: targetId.slice("worker:".length), port: this.wsInfo.port, token: this.wsInfo.token })
+            return
+        }
+
         const window = this.getWindow(targetId)
         if (DIAG) console.info("[stream-port] wire", targetId, "window:", !!window)
 

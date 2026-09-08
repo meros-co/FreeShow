@@ -8,6 +8,7 @@ import { WebRtcHost } from "../../streaming/WebRtcHost"
 import { gpuCompositingAvailable, gpuStateSettled } from "../../utils/gpu"
 import { initializeSender } from "../../blackmagic/bmdTalk"
 import { CaptureHelper } from "../../capture/CaptureHelper"
+import { StreamReceiverHost } from "../../capture/StreamReceiverHost"
 import { NdiSender } from "../../ndi/NdiSender"
 import { setDataNDI } from "../../ndi/talk"
 import { OmtSender } from "../../omt/OmtSender"
@@ -487,6 +488,52 @@ export class OutputLifecycle {
     }
 
     // per-output paint bodies (the "paint" listener above only times and dispatches)
+    // Live input composited into a captured output by the worker (osr-capture's video layer) instead of
+    // being drawn by the page: the page asks for it when the stream is a plain full-cover background, and
+    // only stops drawing once the worker reports that it is compositing.
+    private static videoLayerWanted = new Set<string>()
+    private static videoLayerRunning = new Set<string>()
+    private static videoLayerHooked = false
+
+    static requestVideoLayer(id: string, wanted: boolean) {
+        this.hookVideoLayer()
+        const renderer = RenderGroups.rendererOf(id) || id
+        if (wanted === this.videoLayerWanted.has(renderer)) return
+        if (wanted) this.videoLayerWanted.add(renderer)
+        else this.videoLayerWanted.delete(renderer)
+        StreamReceiverHost.send("videoLayer", { outputId: renderer, active: wanted })
+        if (!wanted) this.setVideoLayerRunning(renderer, false)
+    }
+
+    private static hookVideoLayer() {
+        if (this.videoLayerHooked) return
+        this.videoLayerHooked = true
+        NdiSender.videoLayerHandler = (msg) => {
+            if (msg.type === "videoFrame") {
+                // nothing to do on this thread: the page keeps the window dirty itself (see streamLayer),
+                // because webContents.invalidate() does not produce offscreen paints
+            } else if (msg.type === "videoLayerActive") {
+                this.setVideoLayerRunning(msg.id, msg.active !== false)
+            }
+        }
+    }
+
+    private static setVideoLayerRunning(id: string, running: boolean) {
+        if (running === this.videoLayerRunning.has(id)) return
+        if (running) this.videoLayerRunning.add(id)
+        else this.videoLayerRunning.delete(id)
+        // the worker is compositing: the frame no longer has to reach the page at all
+        if (this.videoLayerWanted.has(id)) StreamReceiverHost.send("videoLayer", { outputId: id, active: true, exclusive: running })
+        // and the window must not paint an opaque backdrop over it (the page drops its own background too)
+        const win = OutputHelper.getOutput(id)?.window
+        if (win && !win.isDestroyed()) {
+            const output = OutputHelper.getOutput(id)
+            win.setBackgroundColor(running || (output as any)?.transparent ? "#00000000" : "#000000")
+        }
+        // every member of the render group draws from this one page
+        for (const m of RenderGroups.members(id)) OutputHelper.Send.sendToWindow(m, { channel: "STREAM_LAYER", data: { id: m, active: running } })
+    }
+
     private static sharedPaintImpls = new Map<string, (event: any, image: Electron.NativeImage) => void>()
     private static onSharedTexturePaint(id: string, event: any, image: Electron.NativeImage) {
         this.sharedPaintImpls.get(id)?.(event, image)

@@ -763,6 +763,12 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
     const rbKey = `${id}#${slot}`
     if (senderData) senderData.offMain = true
     for (const m of omtMembers) OMTS[m]!.offMain = true
+    // the live frame this output is showing, composited under the page by the addon
+    const layer = videoLayers[id]
+    const layerBuf = layer?.current && layer.width && layer.height ? layer.current : null
+    const video = layerBuf ? { width: layer!.width, height: layer!.height, format: layer!.format, data: layerBuf.buf.subarray(0, layerBuf.bytes) } : null
+    if (layerBuf) layerBuf.inUse = true
+
     const twoPhase = typeof osr.readbackConsume === "function" && typeof osr.readbackFinish === "function"
     const singleDispatch = !twoPhase && typeof osr.readbackOnce === "function"
     let textureReleased = false
@@ -808,7 +814,11 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             }
         } else if (twoPhase) {
             if (tl) tl.cS = Date.now()
-            await osr.readbackConsume(source, size.width, size.height, format, rbKey, wantScaled ? dstW : 0, wantScaled ? dstH : 0, gpuTargets ? targets : undefined)
+            await osr.readbackConsume(source, size.width, size.height, format, rbKey, wantScaled ? dstW : 0, wantScaled ? dstH : 0, gpuTargets ? targets : undefined, video || undefined)
+            if (video && !videoLayerReported.has(id)) {
+                videoLayerReported.add(id)
+                port.postMessage({ type: "videoLayerActive", id })
+            }
             if (tl) tl.cE = Date.now()
             releaseTexture()
             if (tl) tl.fS = Date.now()
@@ -992,6 +1002,7 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             const pool = pacerPools[pb.owner]
             if (pool && !pool.includes(pb.buf)) pool.push(pb.buf)
         }
+        if (layerBuf) layerBuf.inUse = false
         releaseTexture() // safety: ensure the texture is released even on error
         releaseReadbackSlot(id, slot)
         // capture fully done -> this pipeline slot frees (main may forward another frame for this output)
@@ -1100,6 +1111,95 @@ setInterval(() => {
     }
 }, 1000)
 
+// Live input composited into a captured output: the frame comes straight from the receive process over
+// the same shared-memory transport the windows use, and osr-capture blends it under the captured page in
+// the convert pass. That keeps the video out of the browser's GPU thread, which is what caps a 4K60 input
+// at about half rate when the page uploads it.
+type VideoBuf = { buf: Buffer; bytes: number; inUse: boolean }
+type VideoLayerState = { bufs: VideoBuf[]; current: VideoBuf | null; width: number; height: number; format: number; ws: any; ring: { name: string; slotBytes: number } | null }
+const videoLayers: { [outputId: string]: VideoLayerState } = {}
+// outputs whose page has been told the composite is running (so it can stop drawing the frame itself)
+const videoLayerReported = new Set<string>()
+const VIDEO_BUFS = 3
+
+function connectVideoSource(targetId: string, outputId: string, wsPort: number, token: string) {
+    const osr = loadOsrCapture()
+    if (!osr || typeof osr.shmReadAsync !== "function" || !osr.videoLayerSupported) return
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const WebSocket = require("ws")
+    const existing = videoLayers[outputId]
+    try {
+        existing?.ws?.close()
+    } catch {}
+    const state: VideoLayerState = { bufs: [], current: null, width: 0, height: 0, format: 0, ws: null, ring: null }
+    videoLayers[outputId] = state
+    const ws = new WebSocket(`ws://127.0.0.1:${wsPort}`)
+    state.ws = ws
+    ws.on("open", () => ws.send(JSON.stringify({ token, targetId, shm: true })))
+    ws.on("message", (raw: any, isBinary: boolean) => {
+        if (isBinary) return
+        let header: any = null
+        try {
+            header = JSON.parse(raw.toString())
+        } catch {
+            return
+        }
+        if (!header || header.slot === undefined) return
+        const done = () => {
+            try {
+                ws.send("1:" + header.slot)
+            } catch {}
+        }
+        if (header.shm && header.shm.name !== state.ring?.name) {
+            try {
+                if (state.ring) osr.shmUnmap(state.ring.name)
+                osr.shmMap(header.shm.name, header.shm.slotBytes * header.shm.slots, false)
+                state.ring = { name: header.shm.name, slotBytes: header.shm.slotBytes }
+            } catch {
+                state.ring = null
+            }
+        }
+        // UYVY composites as it is; BGRA too. Anything else stays with the page's own draw.
+        const format = header.format === "uyvy" ? 1 : header.format === "bgra" ? 0 : -1
+        if (!state.ring || format < 0) return done()
+
+        let slot = state.bufs.find((b) => !b.inUse && b.buf.length >= header.bytes)
+        if (!slot && state.bufs.length < VIDEO_BUFS) {
+            slot = { buf: Buffer.allocUnsafeSlow(header.bytes), bytes: 0, inUse: false }
+            state.bufs.push(slot)
+        }
+        if (!slot) return done() // every buffer is in a readback: drop this frame, the next one is close
+        const target = slot
+        target.inUse = true
+        osr.shmReadAsync(state.ring.name, header.slot * state.ring.slotBytes, target.buf.subarray(0, header.bytes)).then(
+            () => {
+                target.bytes = header.bytes
+                target.inUse = false
+                state.width = header.xres
+                state.height = header.yres
+                state.format = format
+                state.current = target
+                done()
+            },
+            () => {
+                target.inUse = false
+                done()
+            }
+        )
+    })
+    ws.on("close", () => {
+        videoLayerReported.delete(outputId)
+        port.postMessage({ type: "videoLayerActive", id: outputId, active: false })
+        if (videoLayers[outputId] === state) {
+            try {
+                if (state.ring) osr.shmUnmap(state.ring.name)
+            } catch {}
+            delete videoLayers[outputId]
+        }
+    })
+    ws.on("error", () => {})
+}
+
 // Blackmagic output lives here too (BlackmagicBridge on main mirrors device state)
 const BMD_AUDIO_MARKER = Buffer.from([1])
 function bmdReportState(outputId: string) {
@@ -1138,6 +1238,9 @@ port.on("message", (msg: any) => {
         case "webrtcReset":
             // the host window went away or (re)loaded: forget its targets so the next frame asks again
             if (webrtcServer) for (const m of Object.keys(webrtcServer.targets())) webrtcServer.drop(m)
+            break
+        case "videoSource":
+            connectVideoSource(msg.targetId, msg.outputId, msg.port, msg.token)
             break
         case "bmdInit":
             void BlackmagicSender.initialize(msg.outputId, msg.deviceIndex, msg.displayMode, msg.pixelFormat, msg.enableKeying, msg.audioChannels, msg.colorSpace).then(

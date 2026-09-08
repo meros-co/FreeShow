@@ -55,6 +55,13 @@ function releaseFrame(frame: { data: Buffer }) {
 
 // the app window draws previews a few hundred pixels wide
 const PREVIEW_MAX_WIDTH = 480
+// prefix of the targets that are the capture worker rather than a window
+const WORKER_TARGET = "worker:"
+// outputs whose capture worker wants the stream (to composite it into that output's capture), and those
+// where it is actually compositing — only then does the window stop being sent the frame
+const workerTargets = new Set<string>()
+const workerOnly = new Set<string>()
+
 const APP_TARGET = "app"
 
 function toMain(message: any) {
@@ -93,7 +100,13 @@ if (process.env.FS_CAP_STATS) {
 function sendFrame(ipcChannel: string, id: string, outputIds: string[], packed: StreamFrame) {
     const time = Date.now()
 
-    outputIds.forEach((outputId) => frames.deliver(outputId, ipcChannel, id, packed, time, false))
+    outputIds.forEach((outputId) => {
+        // The capture worker composites this frame into the output's captured page (see ndiWorker), so it
+        // subscribes to the same stream as the window — and while it does, the window is not sent the
+        // frame at all: drawing it there is the cost the composite exists to avoid.
+        if (workerTargets.has(outputId)) frames.deliver(WORKER_TARGET + outputId, ipcChannel, id, packed, time, false)
+        if (!workerOnly.has(outputId) || !frames.hasSubscriber(WORKER_TARGET + outputId)) frames.deliver(outputId, ipcChannel, id, packed, time, false)
+    })
     // the receiver's own hold (acquireBuffer) ends here; windows that took the frame keep theirs
     releaseFrame(packed)
 
@@ -692,6 +705,17 @@ const HANDLERS: { [type: string]: (data: any) => any } = {
     "omt:thumbnail": (data) => Omt.thumbnail(data),
     "omt:capture": (data) => Omt.capture(data),
     "omt:stop": (data) => Omt.stop(data),
+    videoLayer: (data: { outputId: string; active: boolean; exclusive?: boolean }) => {
+        if (data.active) workerTargets.add(data.outputId)
+        else {
+            workerTargets.delete(data.outputId)
+            workerOnly.delete(data.outputId)
+            frames.drop(WORKER_TARGET + data.outputId)
+            return
+        }
+        if (data.exclusive) workerOnly.add(data.outputId)
+        else workerOnly.delete(data.outputId)
+    },
     "bmd:thumbnail": (data) => Bmd.thumbnail(data),
     "bmd:capture": (data) => Bmd.capture(data),
     "bmd:stop": (data) => Bmd.stop(data)
