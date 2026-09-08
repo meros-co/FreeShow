@@ -17,6 +17,7 @@ export const compositedOutputs = writable<{ [id: string]: boolean }>({})
 
 const LISTENER_ID = "STREAM_LAYER"
 const listeners = new Set<(id: string, active: boolean) => void>()
+const tickListeners = new Set<(id: string) => void>()
 let receiving = false
 
 function listen() {
@@ -28,7 +29,8 @@ function listen() {
             STREAM_LAYER: (data: { id: string; active: boolean }) => {
                 compositedOutputs.update((a) => ({ ...a, [data.id]: !!data.active }))
                 listeners.forEach((l) => l(data.id, !!data.active))
-            }
+            },
+            STREAM_TICK: (data: { id: string }) => tickListeners.forEach((l) => l(data.id))
         },
         LISTENER_ID
     )
@@ -132,20 +134,47 @@ export class StreamLayer {
         }
     }
 
-    // The page stops drawing while the worker composites, so nothing marks the window dirty and an
-    // offscreen window only paints when it is dirty. A transparent 1px element nudged every animation
-    // frame keeps the frames coming; it paints nothing itself.
-    private damage: HTMLElement | null = null
+    // The page stops drawing while the worker composites, so nothing marks the window dirty — and an
+    // offscreen window only paints when it is. A 1px canvas redrawn on each frame tick keeps the paints
+    // coming at the source's rate; it paints nothing visible itself.
+    private damage: HTMLCanvasElement | null = null
+    private damageCtx: CanvasRenderingContext2D | null = null
+    private flip = false
+    private pending = false
     private raf = 0
+
+    // A tick says a frame reached the worker: it sets the pace. The repaint runs on this page's own
+    // animation loop, so a paint never waits on the round trip that announced it, and never free-runs
+    // either (offscreen rendering has no vsync to throttle it).
+    private tick = (id: string) => {
+        if (id === this.outputId) this.pending = true
+    }
+
+    private loop = () => {
+        this.raf = requestAnimationFrame(this.loop)
+        // one repaint per frame that arrived. A flag rather than a due time: animation frames jitter
+        // either side of the source's interval, and comparing against a deadline drops every other one
+        if (!this.damageCtx || !this.pending) return
+        this.pending = false
+        this.flip = !this.flip
+        this.damageCtx.clearRect(0, 0, 1, 1)
+        // two values that both round to nothing on screen, so the pixel never changes visibly
+        this.damageCtx.fillStyle = this.flip ? "rgba(0,0,0,0.001)" : "rgba(0,0,0,0.002)"
+        this.damageCtx.fillRect(0, 0, 1, 1)
+    }
+
     private driveDamage(on: boolean) {
         if (!on) {
+            tickListeners.delete(this.tick)
             if (this.raf) cancelAnimationFrame(this.raf)
             this.raf = 0
+            this.pending = false
             this.damage?.remove()
             this.damage = null
+            this.damageCtx = null
             return
         }
-        if (this.raf) return
+        if (this.damage) return
         const parent = this.canvas?.parentElement
         if (!parent) return
         const el = document.createElement("canvas")
@@ -154,19 +183,9 @@ export class StreamLayer {
         el.style.cssText = "position:absolute;left:0;top:0;width:1px;height:1px;pointer-events:none;"
         parent.appendChild(el)
         this.damage = el
-        const ctx = el.getContext("2d")
-        let flip = false
-        const tick = () => {
-            flip = !flip
-            if (ctx) {
-                ctx.clearRect(0, 0, 1, 1)
-                // two values that both round to nothing on screen, so the pixel never changes visibly
-                ctx.fillStyle = flip ? "rgba(0,0,0,0.001)" : "rgba(0,0,0,0.002)"
-                ctx.fillRect(0, 0, 1, 1)
-            }
-            this.raf = requestAnimationFrame(tick)
-        }
-        this.raf = requestAnimationFrame(tick)
+        this.damageCtx = el.getContext("2d")
+        tickListeners.add(this.tick)
+        if (!this.raf) this.raf = requestAnimationFrame(this.loop)
     }
 
     destroy() {

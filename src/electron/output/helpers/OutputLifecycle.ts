@@ -510,8 +510,11 @@ export class OutputLifecycle {
         this.videoLayerHooked = true
         NdiSender.videoLayerHandler = (msg) => {
             if (msg.type === "videoFrame") {
-                // nothing to do on this thread: the page keeps the window dirty itself (see streamLayer),
-                // because webContents.invalidate() does not produce offscreen paints
+                // A frame reached the worker. The page draws nothing now, so it needs telling to mark the
+                // window dirty — offscreen windows only paint when they are, and webContents.invalidate()
+                // does not do it. One tick per frame also paces the capture to the source instead of the
+                // compositor's free-running rate (vsync is off for offscreen rendering).
+                if (this.videoLayerRunning.has(msg.id)) OutputHelper.Send.sendToWindow(msg.id, { channel: "STREAM_TICK", data: { id: msg.id } })
             } else if (msg.type === "videoLayerActive") {
                 this.setVideoLayerRunning(msg.id, msg.active !== false)
             }

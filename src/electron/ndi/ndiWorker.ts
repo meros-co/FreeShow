@@ -1180,6 +1180,9 @@ function connectVideoSource(targetId: string, outputId: string, wsPort: number, 
                 state.format = format
                 state.current = target
                 done()
+                // the page is not drawing this frame; it repaints once per frame on this tick, which
+                // keeps the capture running at the source's rate rather than as fast as it can paint
+                port.postMessage({ type: "videoFrame", id: outputId })
             },
             () => {
                 target.inUse = false
