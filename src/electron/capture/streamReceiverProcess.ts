@@ -146,6 +146,8 @@ class Ndi {
     static receivers: { [id: string]: ReceiverState } = {}
     static active: { [id: string]: any } = {}
     static outputs: string[] = []
+    // see the OMT class: a frame only reaches outputs actually showing that source
+    static outputSource: { [outputId: string]: string } = {}
     static fourCCUyvy: number | null = null
     private static findInterval: NodeJS.Timeout | null = null
 
@@ -287,7 +289,7 @@ class Ndi {
         const packed = packStreamFrame(frame.data, frame.xres, frame.yres, frame.lineStrideBytes || 0, format)
         if (!packed) return
 
-        sendFrame("NDI", id, this.outputs, packed)
+        sendFrame("NDI", id, this.outputs.filter((outputId) => this.outputSource[outputId] === id), packed)
     }
 
     static async thumbnail({ source }: { source: any }) {
@@ -302,6 +304,7 @@ class Ndi {
 
     static async capture({ source, outputId }: { source: any; outputId: string }) {
         if (!this.outputs.includes(outputId)) this.outputs.push(outputId)
+        this.outputSource[outputId] = source.id
 
         // if a thumbnail loop is running, upgrade it to full capture
         if (this.receivers[source.id]) {
@@ -326,7 +329,11 @@ class Ndi {
             if (data.outputId) {
                 const index = this.outputs.indexOf(data.outputId)
                 if (index >= 0) this.outputs.splice(index, 1)
-            } else this.outputs = []
+                delete this.outputSource[data.outputId]
+            } else {
+                this.outputs = []
+                this.outputSource = {}
+            }
 
             if (!this.outputs.length && this.receivers[data.id]) {
                 this.receivers[data.id].shouldStop = true
@@ -393,6 +400,15 @@ class Omt {
         return Object.keys(this.outputRefs)
     }
 
+    // Which source each output is currently showing. A frame must never reach an output that is not
+    // showing it: the capture worker composites whatever it is handed, so a thumbnail refresh for a
+    // different source used to flash that source's picture into a live output.
+    private static outputSource: { [outputId: string]: string } = {}
+
+    private static outputsFor(sourceId: string) {
+        return this.outputs.filter((outputId) => this.outputSource[outputId] === sourceId)
+    }
+
     private static readonly RECEIVE_TIMEOUT_MS = 50
     private static readonly FULL_LOOP_DELAY_MS = 16 // ~60fps ceiling
     // Drawer and editor tiles are snapshots, not live streams: take one frame, drop the connection, and
@@ -443,6 +459,7 @@ class Omt {
 
     static async capture({ source, outputId }: { source: any; outputId: string }) {
         this.outputRefs[outputId] = (this.outputRefs[outputId] || 0) + 1
+        this.outputSource[outputId] = source.id
 
         // a running full-quality loop already serves this source; a thumbnail loop holds a
         // low-bandwidth instance and a stopping loop still holds its instance, so either is ended and
@@ -564,7 +581,7 @@ class Omt {
         const packed = packStreamFrame(frame.data, frame.width, frame.height, frame.stride || 0, format)
         if (!packed) return
 
-        sendFrame("OMT", id, this.outputs, packed)
+        sendFrame("OMT", id, this.outputsFor(id), packed)
     }
 
     static stop(data: { id: string; outputId?: string } | null = null): Promise<void> {
@@ -572,8 +589,14 @@ class Omt {
             if (data.outputId) {
                 const refs = (this.outputRefs[data.outputId] || 0) - 1
                 if (refs > 0) this.outputRefs[data.outputId] = refs
-                else delete this.outputRefs[data.outputId]
-            } else this.outputRefs = {}
+                else {
+                    delete this.outputRefs[data.outputId]
+                    delete this.outputSource[data.outputId]
+                }
+            } else {
+                this.outputRefs = {}
+                this.outputSource = {}
+            }
 
             const loop = this.loops[data.id]
             if (!this.outputs.length && loop) return this.stopLoop(loop)
@@ -597,6 +620,8 @@ type BmdReceiver = { spec: BmdCaptureSpec; channel: any; running: boolean; stopp
 class Bmd {
     static receivers: { [deviceId: string]: BmdReceiver } = {}
     static outputs: string[] = []
+    // see the OMT class: a frame only reaches outputs actually showing that device
+    static outputSource: { [outputId: string]: string } = {}
 
     private static async open(spec: BmdCaptureSpec): Promise<BmdReceiver | null> {
         const existing = this.receivers[spec.deviceId]
@@ -669,6 +694,7 @@ class Bmd {
 
     static async capture(data: BmdCaptureSpec & { outputId: string }) {
         if (!this.outputs.includes(data.outputId)) this.outputs.push(data.outputId)
+        this.outputSource[data.outputId] = data.deviceId
         const receiver = await this.open(data)
         if (!receiver || receiver.running) return
         receiver.running = true
@@ -681,7 +707,7 @@ class Bmd {
             const frame = await receiver.channel.frame()
             if (receiver.stopped) break
             const packed = this.pack(receiver, frame)
-            if (packed) sendFrame("BLACKMAGIC", receiver.spec.deviceId, this.outputs, packed)
+            if (packed) sendFrame("BLACKMAGIC", receiver.spec.deviceId, this.outputs.filter((o) => this.outputSource[o] === receiver.spec.deviceId), packed)
         }
     }
 
