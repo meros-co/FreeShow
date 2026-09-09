@@ -724,7 +724,10 @@ export class OutputLifecycle {
         const forwardOffMain = (rec: { tex: any; source: any; width: number; height: number }) => {
             const { tex, source, width, height } = rec
             const output = OutputHelper.getOutput(id)
-            const framerate = output?.captureOptions?.framerates?.ndi || 30
+            // the fastest consumer this output actually has, not the NDI setting: an output with no NDI
+            // member was paced by a rate nothing on it was using
+            const capOpts = output?.captureOptions
+            const framerate = capOpts ? CaptureHelper.getMaxActiveFramerate(capOpts.framerates || {}, capOpts.options || {}) : 1
             const ratio = height ? width / height : 16 / 9
             const transparent = output?.transparent === true
             // every member of this render (the renderer itself plus its followers) gets this one readback,
