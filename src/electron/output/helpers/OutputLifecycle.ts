@@ -940,6 +940,13 @@ export class OutputLifecycle {
                 }
                 return
             }
+            // a texture is back: drop the CPU frame this output was holding in main, and re-arm the
+            // warning so a later loss is visible rather than silently permanent
+            if (cpuFallback) {
+                cpuFallback = false
+                lastCpuImage = null
+                console.info(`[OSR ${id}] GPU shared texture restored`)
+            }
             if (STATS) {
                 sPaints++
                 const nowP = Date.now()

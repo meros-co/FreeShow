@@ -40,9 +40,18 @@ function buildProgram(context: WebGLRenderingContext, fragmentSource = UYVY_SHAD
 }
 
 // A canvas can only ever have one kind of context, so prove the GPU path on a throwaway canvas first.
+// A negative result is NOT cached: WebGL is unavailable while the GPU process is restarting, and caching
+// that would put every stream on the CPU for the rest of the session. Re-probing costs one throwaway
+// canvas, and only happens on frames that would otherwise take the CPU path anyway.
 let gpuConvertSupported: boolean | null = null
+let gpuProbedAt = 0
 function canConvertOnGPU() {
-    if (gpuConvertSupported !== null) return gpuConvertSupported
+    if (gpuConvertSupported) return true
+    // back off between failed probes by the time since the last one, so a permanently GPU-less machine
+    // settles into probing rarely instead of once per frame
+    const now = Date.now()
+    if (gpuConvertSupported === false && now - gpuProbedAt < Math.min(gpuProbeBackoff, 30000)) return false
+    gpuProbedAt = now
     gpuConvertSupported = false
     try {
         const probe = document.createElement("canvas").getContext("webgl")
@@ -53,8 +62,10 @@ function canConvertOnGPU() {
     } catch (err) {
         console.warn("[stream] GPU frame conversion unavailable:", err)
     }
+    gpuProbeBackoff = gpuConvertSupported ? 250 : gpuProbeBackoff * 2
     return gpuConvertSupported
 }
+let gpuProbeBackoff = 250
 
 function uyvyToRGBA(source: Uint8Array, width: number, height: number) {
     const out = new Uint8ClampedArray(width * height * 4)
@@ -90,6 +101,8 @@ export class StreamCanvasRenderer {
     private programs: { uyvy?: GpuProgram; rgba?: GpuProgram } = {}
     private textureSize = ""
     private ctx2d: CanvasRenderingContext2D | null = null
+    private reportedCpu = false
+    private lossHooked = false
 
     draw(canvas: HTMLCanvasElement, frame: StreamFrame) {
         const width = frame.xres
@@ -99,6 +112,11 @@ export class StreamCanvasRenderer {
 
         if (!this.ctx2d && canConvertOnGPU() && this.drawOnGPU(canvas, width, height, data, frame.format)) return
         this.drawOnCPU(canvas, width, height, data, frame.format)
+        // this canvas is a 2D canvas for good now, but the element can be replaced: tell whoever owns it
+        if (!this.reportedCpu) {
+            this.reportedCpu = true
+            canvas.dispatchEvent(new CustomEvent("streamcpufallback", { bubbles: true }))
+        }
     }
 
     destroy() {
@@ -111,6 +129,19 @@ export class StreamCanvasRenderer {
     private initGL(canvas: HTMLCanvasElement) {
         this.gl = canvas.getContext("webgl", { alpha: false, antialias: false, depth: false, stencil: false, preserveDrawingBuffer: true })
         if (!this.gl) return false
+
+        // a lost context is recoverable: drop the GL state and rebuild it on the next frame rather than
+        // giving up on the GPU for the life of this renderer
+        if (!this.lossHooked) {
+            this.lossHooked = true
+            canvas.addEventListener("webglcontextlost", (e) => {
+                e.preventDefault()
+                this.gl = null
+                this.programs = {}
+                this.texture = null
+                this.textureSize = ""
+            })
+        }
 
         const gl = this.gl
         gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer())
