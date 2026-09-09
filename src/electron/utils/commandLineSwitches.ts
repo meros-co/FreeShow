@@ -12,6 +12,10 @@ export function applyCommandLineSwitches() {
     // Prevent Chromium from suspending muted background media in offscreen capture windows
     app.commandLine.appendSwitch("disable-background-media-suspend")
 
+    // FS_DEBUG_PORT (temporary diagnostic): expose the Chrome DevTools protocol so the running app can be
+    // driven and inspected from outside
+    if (process.env.FS_DEBUG_PORT) app.commandLine.appendSwitch("remote-debugging-port", process.env.FS_DEBUG_PORT)
+
     if (process.platform === "linux") applyLinuxSwitches()
 }
 

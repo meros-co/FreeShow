@@ -25,9 +25,13 @@
     let canvas: HTMLCanvasElement | undefined
 
     onMount(() => {
-        if (background) {
-            if (!mirror) send(OMT, ["CAPTURE_STREAM"], { source: screen, outputId: outputId || Object.keys($outputs)[0] })
-        } else send(OMT, ["RECEIVE_STREAM"], { source: screen })
+        // A full-quality receive belongs only to a real output. Everything else showing this source (a
+        // drawer tile, an editor preview) is a thumbnail, and asking for the full stream made the media
+        // drawer start a 4K decode per source — including FreeShow's own output — which halved the
+        // output rate and made the picture judder.
+        if (background && mirror) return
+        if (background && outputId) send(OMT, ["CAPTURE_STREAM"], { source: screen, outputId })
+        else send(OMT, ["RECEIVE_STREAM"], { source: screen })
     })
 
     const renderer = new StreamCanvasRenderer()
@@ -58,7 +62,7 @@
         layer.destroy()
         renderer.destroy()
         stopStream()
-        if (background && !mirror) send(OMT, ["CAPTURE_DESTROY"], { id: screen.id, outputId: outputId || Object.keys($outputs)[0] })
+        if (background && !mirror && outputId) send(OMT, ["CAPTURE_DESTROY"], { id: screen.id, outputId })
     })
 
     let loaded = false

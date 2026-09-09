@@ -25,7 +25,8 @@
 
     onMount(() => {
         if (background) {
-            if (!mirror) send(BLACKMAGIC, ["RECEIVE_STREAM"], { source: screen, outputId: outputId || Object.keys($outputs)[0] })
+            // only a real output takes the full-quality receive; a tile has no outputId (see OMTStream)
+            if (!mirror) send(BLACKMAGIC, ["RECEIVE_STREAM"], { source: screen, outputId: outputId || undefined })
         } else send(BLACKMAGIC, ["RECEIVE_FRAME"], { source: screen })
     })
 
