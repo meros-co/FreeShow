@@ -97,8 +97,8 @@ fires whether or not a new frame exists.
 | Shared-texture capture | full | full | full |
 | GPU convert BGRA to UYVY / UYVA / RGBA | full | full | full |
 | GPU downscale (single scaled output) | full | full | full |
-| **Per-consumer scaled targets** | full | written, unverified | written, unverified |
-| **I420 target (RTMP)** | full | written, unverified | written, unverified |
+| **Per-consumer scaled targets** | full | written, needs a Mac | builds + shaders compile (WSL) |
+| **I420 target (RTMP)** | full | written, needs a Mac | builds + shaders compile (WSL) |
 | **Video-layer composite (live input)** | full | **absent** | **absent** |
 | **Cached-frame re-convert** | full | **absent** | **absent** |
 | Two-phase consume/finish | unconditional | conditional | conditional |
@@ -292,8 +292,20 @@ Also ruled out by measurement: pipeline depth. Forcing the derived depth from 2 
 Use a hardware source, a second machine, or a locally decoded clip, and always report what the source
 actually delivered alongside what came out.
 
-**Still unmeasured:** several concurrent 4K60 outputs with receivers on all of them, which is the real
-bar. That needs a second output enabled in the app settings.
+**Two concurrent 4K60 outputs, NDI and OMT, receivers attached to both, playing the 4K60 clip:**
+
+| output | unique fps sent | receiver saw |
+|---|---|---|
+| NDI 1 | 53-59 | 49-59 |
+| Output 1 (OMT) | 53-58 | ~58 |
+
+Paints 57-60, round trip 15ms, about 7.4 cores.
+
+With a real 4K60 live OMT source instead of the clip, everything on this one machine settles at about
+32 frames per second end to end: the source app itself drops to 31 while FreeShow encodes two 4K
+outputs. FreeShow forwarded 31-33 unique while 32-33 arrived, so its own loss is still near zero. The
+NDI receiver's apparent 58 per second was mostly repeat filler and gets no credit. Proving 4K60 live
+input into two 4K60 outputs needs the source and the receivers off this box.
 
 ---
 
