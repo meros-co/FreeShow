@@ -231,6 +231,9 @@ class Ndi {
         }
     }
 
+    // see the OMT loop: drawer and editor tiles are periodic snapshots, not live streams
+    static readonly THUMBNAIL_REFRESH_MS = 30000
+
     static async frameLoop(sourceId: string, thumbnail: boolean) {
         let consecutiveErrors = 0
 
@@ -247,15 +250,19 @@ class Ndi {
                     throw new Error("No video data received")
                 }
 
-                const rawFrame = await receiver.video(50)
+                // a fresh receiver needs longer for its first frame than a running one does for its next
+                const rawFrame = await receiver.video(thumbnail ? 1000 : 50)
                 if (rawFrame) {
                     this.sendBuffer(sourceId, rawFrame)
                     consecutiveErrors = 0
 
                     // video() already blocks until the next frame, so pace on the source: waiting
-                    // after every frame pushes the next fetch past the frame after it
-                    if (thumbnail) await new Promise((resolve) => setTimeout(resolve, 500))
-                    else await new Promise((resolve) => setImmediate(resolve))
+                    // after every frame pushes the next fetch past the frame after it. A tile is a
+                    // snapshot, so it drops the receiver and holds nothing open between refreshes.
+                    if (thumbnail) {
+                        delete this.active[sourceId]
+                        await new Promise((resolve) => setTimeout(resolve, Ndi.THUMBNAIL_REFRESH_MS))
+                    } else await new Promise((resolve) => setImmediate(resolve))
                     continue
                 }
             } catch (err: any) {
@@ -366,6 +373,7 @@ async function loadOmt() {
 type OmtLoop = {
     source: any
     lowbandwidth: boolean
+    snapshot: boolean
     frameBytes: number
     stopped: boolean
     receiver: any
@@ -387,7 +395,12 @@ class Omt {
 
     private static readonly RECEIVE_TIMEOUT_MS = 50
     private static readonly FULL_LOOP_DELAY_MS = 16 // ~60fps ceiling
-    private static readonly THUMBNAIL_LOOP_DELAY_MS = 500
+    // Drawer and editor tiles are snapshots, not live streams: take one frame, drop the connection, and
+    // come back later. Holding a receiver open made the sender count the tile as a viewer, which on
+    // FreeShow's own output lifted its idle gate and drove the encoder at full rate for a thumbnail.
+    private static readonly THUMBNAIL_REFRESH_MS = 30000
+    private static readonly SNAPSHOT_RECEIVE_TIMEOUT_MS = 1000 // a fresh receiver needs longer for its first frame
+    private static readonly SNAPSHOT_RETRY_MS = 1000 // nothing arrived: come back sooner than a full refresh
 
     static async createReceiver(address: string, lowbandwidth = false) {
         try {
@@ -425,7 +438,7 @@ class Omt {
             if (!existing.stopped) return
             await this.stopLoop(existing)
         }
-        this.startLoop(source, true, this.THUMBNAIL_LOOP_DELAY_MS)
+        this.startLoop(source, true, this.THUMBNAIL_REFRESH_MS)
     }
 
     static async capture({ source, outputId }: { source: any; outputId: string }) {
@@ -444,7 +457,8 @@ class Omt {
     }
 
     private static startLoop(source: any, lowbandwidth: boolean, delayMs: number) {
-        const loop: OmtLoop = { source, lowbandwidth, frameBytes: 0, stopped: false, receiver: null, done: Promise.resolve(), wake: null }
+        // low bandwidth and snapshot go together: only tiles ask for either
+        const loop: OmtLoop = { source, lowbandwidth, snapshot: lowbandwidth, frameBytes: 0, stopped: false, receiver: null, done: Promise.resolve(), wake: null }
         this.loops[source.id] = loop
         loop.done = this.frameLoop(source.id, loop, delayMs).catch((err) => log("OMT reception error for " + source.id + ": " + err.message))
     }
@@ -488,7 +502,8 @@ class Omt {
                     const tRecv = performance.now()
                     let frame: any = null
                     try {
-                        frame = await loop.receiver.receive(this.RECEIVE_TIMEOUT_MS, 2 /* Video */, into || undefined)
+                        const timeoutMs = loop.snapshot ? this.SNAPSHOT_RECEIVE_TIMEOUT_MS : this.RECEIVE_TIMEOUT_MS
+                        frame = await loop.receiver.receive(timeoutMs, 2 /* Video */, into || undefined)
                     } finally {
                         if (into && !(frame?.data && frame.data.buffer === into.buffer)) releaseFrame({ data: into } as StreamFrame)
                     }
@@ -504,8 +519,11 @@ class Omt {
                     } else loopStats.empty++
 
                     // receive() already blocks until the next frame, so pace on the source rather than a timer.
-                    // Idle (no frame) still backs off, and thumbnails keep their slow rate.
-                    if (frame?.data && delayMs < this.THUMBNAIL_LOOP_DELAY_MS) await new Promise((resolve) => setImmediate(resolve))
+                    // Idle (no frame) still backs off. A snapshot holds nothing open between refreshes.
+                    if (loop.snapshot) {
+                        this.destroyInstance(loop)
+                        await this.pause(loop, frame?.data ? delayMs : this.SNAPSHOT_RETRY_MS)
+                    } else if (frame?.data) await new Promise((resolve) => setImmediate(resolve))
                     else await this.pause(loop, delayMs)
                 } catch (err: any) {
                     consecutiveErrors++
