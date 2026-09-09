@@ -5,6 +5,7 @@
     import { onPreviewFrame } from "../../../utils/previewPort"
     import { send } from "../../../utils/request"
     import { StreamCanvasRenderer } from "../../drawer/live/streamCanvas"
+    import { compositedOutputs } from "../../drawer/live/streamLayer"
     import Icon from "../../helpers/Icon.svelte"
     //import { currentWindow, outputs, styles } from "../../../stores"
     import { getResolution } from "../../helpers/output"
@@ -50,7 +51,10 @@
         const now = performance.now()
         if (lastFrameAt) {
             const gap = now - lastFrameAt
-            frameInterval = frameInterval ? frameInterval * 0.8 + gap * 0.2 : gap
+            // rise immediately, fall slowly: when the capture rate drops (a receiver disconnects and
+            // admission backs off), a slow-rising average declares the capture stale within one frame and
+            // flips the preview back to the mirror, which reads as a flicker
+            frameInterval = frameInterval ? Math.max(gap, frameInterval * 0.8 + gap * 0.2) : gap
         }
         lastFrameAt = now
         if (frameInterval) {
@@ -69,6 +73,10 @@
         if (staleTimer) clearTimeout(staleTimer)
         staleTimer = null
     }
+
+    // While the worker composites the live input, the output page draws nothing on purpose, so the
+    // mirrored copy below would be empty. Hold the last capture frame instead of flashing to it.
+    $: composited = !!$compositedOutputs[outputId]
 
     $: subscribePreview(captured && !stageOutput ? outputId : "")
     function subscribePreview(id: string) {
@@ -99,9 +107,9 @@
         <StageLayout {outputId} stageId={stageOutput} preview={!disableTransitions} edit={false} />
     {:else}
         {#if captured}
-            <canvas class="capturePreview" class:hidden={!liveCapture} bind:this={previewCanvas} />
+            <canvas class="capturePreview" class:hidden={!liveCapture && !composited} bind:this={previewCanvas} />
         {/if}
-        {#if !captured || !liveCapture}
+        {#if !captured || (!liveCapture && !composited)}
             <Output {outputId} style={getStyleResolution(resolution, fullscreen ? width : resolution.width, fullscreen ? height : resolution.height, "fit")} mirror preview={!disableTransitions} />
         {/if}
     {/if}

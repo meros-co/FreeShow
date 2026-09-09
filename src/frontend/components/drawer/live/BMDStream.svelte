@@ -31,7 +31,11 @@
 
     const renderer = new StreamCanvasRenderer()
     // a full-cover background on a captured output is composited by the worker instead (see streamLayer)
-    const layer = new StreamLayer(background && !mirror ? outputId || Object.keys($outputs)[0] : "", () => (composited = layer.composited))
+    // Only the component actually drawing an output's background may drive the composite. A drawer tile
+    // is rendered with `background` too but no outputId, and falling back to the first output in the
+    // store made it fight the real output: its small tile is never a full cover, so it kept cancelling
+    // the composite the output had just turned on, and both flickered.
+    const layer = new StreamLayer(background && !mirror && outputId ? outputId : "", () => (composited = layer.composited))
     let composited = false
     $: if (frame && canvas) {
         layer.update(canvas, frame.xres, frame.yres)
