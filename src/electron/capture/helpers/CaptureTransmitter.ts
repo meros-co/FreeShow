@@ -596,6 +596,11 @@ export class CaptureTransmitter {
     static sendBufferToMain(captureId: string, image: NativeImage) {
         if (!image) return
 
+        // toBitmap is a full-frame allocation and copy (~33MB at 4K). Nothing below needs it unless a
+        // stage client or a preview is actually waiting for this output, so establish that first.
+        const stageWanted = getConnections("STAGE") > 0 && getStageStreamSubscriberIds().length > 0
+        if (!stageWanted && !this.requestList.length) return
+
         const buffer = image.toBitmap()
         const size = image.getSize()
         if (this.shouldSkipUnchangedNonBlackmagicFrame("stage", captureId, buffer, size)) return
