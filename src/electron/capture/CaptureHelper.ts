@@ -22,10 +22,9 @@ export class CaptureHelper {
     }
     static customFramerates: { [key: string]: { [key: string]: number } } = {}
 
-    static getDefaultCapture(window: BrowserWindow, id: string): CaptureOptions {
-        const screen: Display = this.getWindowScreen(window)
-
-        const defaultFramerates = {
+    // the rate each consumer starts at, so callers never restate one as a literal
+    static defaultFramerates(): { [key: string]: number } {
+        return {
             ndi: this.framerates.connected,
             omt: this.framerates.connected,
             blackmagic: this.framerates.unconnected,
@@ -34,6 +33,12 @@ export class CaptureHelper {
             webrtc: this.framerates.webrtc,
             rtmp: this.framerates.rtmp
         }
+    }
+
+    static getDefaultCapture(window: BrowserWindow, id: string): CaptureOptions {
+        const screen: Display = this.getWindowScreen(window)
+
+        const defaultFramerates = this.defaultFramerates()
 
         return {
             window,

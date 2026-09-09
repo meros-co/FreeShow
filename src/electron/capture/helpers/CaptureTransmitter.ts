@@ -406,7 +406,7 @@ export class CaptureTransmitter {
         const output = OutputHelper.getOutput(captureId)
         const ratio = size.height ? size.width / size.height : 16 / 9
         const transparent = output?.transparent === true
-        const framerate = output?.captureOptions?.framerates?.ndi || 30
+        const framerate = output?.captureOptions?.framerates?.ndi || CaptureHelper.defaultFramerates().ndi
         NdiSender.sendVideoBufferNDI(captureId, Buffer.from(buffer), { size, ratio, framerate, transparent, format })
     }
 
@@ -513,7 +513,7 @@ export class CaptureTransmitter {
         const output = OutputHelper.getOutput(captureId)
         const ratio = image.getAspectRatio()
         const transparent = output?.transparent === true
-        const framerate = output?.captureOptions?.framerates?.ndi || 30
+        const framerate = output?.captureOptions?.framerates?.ndi || CaptureHelper.defaultFramerates().ndi
 
         NdiSender.sendVideoBufferNDI(captureId, buffer, { size, ratio, framerate, transparent })
     }
