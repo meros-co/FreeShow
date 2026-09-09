@@ -7,6 +7,7 @@
     import Card from "../Card.svelte"
     import SelectElem from "../../system/SelectElem.svelte"
     import { StreamCanvasRenderer } from "./streamCanvas"
+    import { cacheStreamFrame, getCachedStreamFrame } from "./streamCache"
     import { StreamLayer } from "./streamLayer"
     import { onStreamFrame } from "../../../utils/streamPort"
 
@@ -42,6 +43,15 @@
     // the composite the output had just turned on, and both flickered.
     const layer = new StreamLayer(background && !mirror && outputId ? outputId : "", () => (composited = layer.composited))
     let composited = false
+    // show the last picture this source had immediately; a live frame replaces it when one arrives
+    $: if (canvas && !frame && !background) {
+        const cached = getCachedStreamFrame(screen.id)
+        if (cached) {
+            renderer.draw(canvas, cached as never)
+            loaded = true
+        }
+    }
+
     $: if (frame && canvas) {
         layer.update(canvas, frame.xres, frame.yres)
         if (!composited) renderer.draw(canvas, frame)
@@ -50,6 +60,8 @@
     const receiveStream = (data: { id: string; frame: any; time: number }) => {
         if (data.id !== screen.id) return
         loaded = true
+        // a tile is only refreshed every so often, so keep this one for the next time it is mounted
+        if (!background) cacheStreamFrame(screen.id, data.frame)
 
         // Take the newest frame rather than dropping by age. Svelte coalesces several arrivals in one
         // tick into a single draw, so a burst still never renders a backlog, while an absolute age cut

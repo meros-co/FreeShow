@@ -114,7 +114,9 @@
         padding: 0;
         border: none;
         border-radius: 50%;
-        background-color: rgb(0 0 0 / 0.55);
+        background-color: rgb(0 0 0 / 0.6);
+        /* a button resets the inherited text colour, and the icon draws in currentColor */
+        color: #fff;
 
         z-index: 2;
         transition: 0.2s opacity;
