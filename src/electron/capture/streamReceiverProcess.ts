@@ -97,7 +97,10 @@ if (process.env.FS_CAP_STATS) {
 // Outputs render the stream itself and need every pixel; the app window only ever previews it (drawer
 // card, output mirror) so it gets a small copy of every frame, which keeps the preview as smooth as
 // the output without paying full frame size for it.
-function sendFrame(ipcChannel: string, id: string, outputIds: string[], packed: StreamFrame) {
+// returns whether the app window was actually given a preview of this frame: a snapshot has to know,
+// because the first frames arrive before the window has subscribed and are dropped here, and waiting a
+// full refresh interval to try again leaves the tile on its loading spinner
+function sendFrame(ipcChannel: string, id: string, outputIds: string[], packed: StreamFrame): boolean {
     const time = Date.now()
 
     outputIds.forEach((outputId) => {
@@ -112,18 +115,20 @@ function sendFrame(ipcChannel: string, id: string, outputIds: string[], packed: 
 
     if (!frames.hasSubscriber(APP_TARGET)) {
         frames.request(APP_TARGET, true)
-        return
+        return false
     }
     const tPreview = performance.now()
     const preview = previewStreamFrame(packed, PREVIEW_MAX_WIDTH)
     loopStats.previewMs += performance.now() - tPreview
     frames.deliver(APP_TARGET, ipcChannel, id, preview, time, true)
+    return true
 }
 
 type ReceiverState = {
     shouldStop?: boolean
     source: any
     lowbandwidth?: boolean
+    wake?: (() => void) | null
 }
 
 // ----- NDI -----
@@ -236,6 +241,19 @@ class Ndi {
     // see the OMT loop: drawer and editor tiles are periodic snapshots, not live streams
     static readonly THUMBNAIL_REFRESH_MS = 30000
 
+    // a sleep a refresh request can cut short (see the OMT loop's pause)
+    static sleep(state: ReceiverState, ms: number) {
+        return new Promise<void>((resolve) => {
+            const timer = setTimeout(finish, ms)
+            function finish() {
+                clearTimeout(timer)
+                state.wake = null
+                resolve()
+            }
+            state.wake = finish
+        })
+    }
+
     static async frameLoop(sourceId: string, thumbnail: boolean) {
         let consecutiveErrors = 0
 
@@ -260,10 +278,12 @@ class Ndi {
 
                     // video() already blocks until the next frame, so pace on the source: waiting
                     // after every frame pushes the next fetch past the frame after it. A tile is a
-                    // snapshot, so it drops the receiver and holds nothing open between refreshes.
+                    // snapshot, so it drops the receiver and holds nothing open between refreshes — but
+                    // only once it has a picture: dropping it before that restarts the connection every
+                    // attempt and the tile sits on its loading spinner.
                     if (thumbnail) {
                         delete this.active[sourceId]
-                        await new Promise((resolve) => setTimeout(resolve, Ndi.THUMBNAIL_REFRESH_MS))
+                        await Ndi.sleep(state, Ndi.THUMBNAIL_REFRESH_MS)
                     } else await new Promise((resolve) => setImmediate(resolve))
                     continue
                 }
@@ -282,14 +302,14 @@ class Ndi {
         }
     }
 
-    static sendBuffer(id: string, frame: any) {
-        if (!frame?.data) return
+    static sendBuffer(id: string, frame: any): boolean {
+        if (!frame?.data) return false
 
         const format: StreamFrameFormat = frame.fourCC === this.fourCCUyvy ? "uyvy" : "rgba"
         const packed = packStreamFrame(frame.data, frame.xres, frame.yres, frame.lineStrideBytes || 0, format)
-        if (!packed) return
+        if (!packed) return false
 
-        sendFrame("NDI", id, this.outputs.filter((outputId) => this.outputSource[outputId] === id), packed)
+        return sendFrame("NDI", id, this.outputs.filter((outputId) => this.outputSource[outputId] === id), packed)
     }
 
     static async thumbnail({ source }: { source: any }) {
@@ -300,6 +320,13 @@ class Ndi {
             lowbandwidth: true
         }
         this.frameLoop(source.id, true).catch((err) => log("NDI thumbnail error for " + source.id + ": " + err.message))
+    }
+
+    // refresh now rather than waiting out the snapshot interval (the tile's refresh button)
+    static refresh({ source }: { source: any }) {
+        const state = this.receivers[source.id]
+        if (state?.lowbandwidth && !state.shouldStop) state.wake?.()
+        else if (!state) void this.thumbnail({ source })
     }
 
     static async capture({ source, outputId }: { source: any; outputId: string }) {
@@ -381,6 +408,7 @@ type OmtLoop = {
     source: any
     lowbandwidth: boolean
     snapshot: boolean
+    gotFirst: boolean
     frameBytes: number
     stopped: boolean
     receiver: any
@@ -457,6 +485,13 @@ class Omt {
         this.startLoop(source, true, this.THUMBNAIL_REFRESH_MS)
     }
 
+    // refresh now rather than waiting out the snapshot interval (the tile's refresh button)
+    static refresh({ source }: { source: any }) {
+        const loop = this.loops[source.id]
+        if (loop?.snapshot && !loop.stopped) loop.wake?.()
+        else if (!loop) void this.thumbnail({ source })
+    }
+
     static async capture({ source, outputId }: { source: any; outputId: string }) {
         this.outputRefs[outputId] = (this.outputRefs[outputId] || 0) + 1
         this.outputSource[outputId] = source.id
@@ -475,7 +510,7 @@ class Omt {
 
     private static startLoop(source: any, lowbandwidth: boolean, delayMs: number) {
         // low bandwidth and snapshot go together: only tiles ask for either
-        const loop: OmtLoop = { source, lowbandwidth, snapshot: lowbandwidth, frameBytes: 0, stopped: false, receiver: null, done: Promise.resolve(), wake: null }
+        const loop: OmtLoop = { source, lowbandwidth, snapshot: lowbandwidth, gotFirst: false, frameBytes: 0, stopped: false, receiver: null, done: Promise.resolve(), wake: null }
         this.loops[source.id] = loop
         loop.done = this.frameLoop(source.id, loop, delayMs).catch((err) => log("OMT reception error for " + source.id + ": " + err.message))
     }
@@ -527,10 +562,11 @@ class Omt {
                     const tGot = performance.now()
                     loopStats.recvMs += tGot - tRecv
                     if (loop.stopped) break
+                    let delivered = false
                     if (frame?.data) {
                         loopStats.frames++
                         loop.frameBytes = Math.max(loop.frameBytes, frame.data.length)
-                        this.sendBuffer(sourceId, frame)
+                        delivered = this.sendBuffer(sourceId, frame)
                         loopStats.sendMs += performance.now() - tGot
                         consecutiveErrors = 0
                     } else loopStats.empty++
@@ -538,8 +574,13 @@ class Omt {
                     // receive() already blocks until the next frame, so pace on the source rather than a timer.
                     // Idle (no frame) still backs off. A snapshot holds nothing open between refreshes.
                     if (loop.snapshot) {
+                        // Until there is a picture at all, keep the receiver and keep asking: a source needs
+                        // a moment to connect, and tearing the receiver down after every attempt restarts
+                        // that negotiation, so a tile could sit on its loading spinner for a long time.
+                        if (!delivered && !loop.gotFirst) continue
+                        loop.gotFirst = loop.gotFirst || delivered
                         this.destroyInstance(loop)
-                        await this.pause(loop, frame?.data ? delayMs : this.SNAPSHOT_RETRY_MS)
+                        await this.pause(loop, delivered ? delayMs : this.SNAPSHOT_RETRY_MS)
                     } else if (frame?.data) await new Promise((resolve) => setImmediate(resolve))
                     else await this.pause(loop, delayMs)
                 } catch (err: any) {
@@ -575,13 +616,13 @@ class Omt {
     }
 
     static sendBuffer(id: string, frame: any) {
-        if (!frame?.data) return
+        if (!frame?.data) return false
 
         const format: StreamFrameFormat = frame.codec === this.codecs?.UYVY ? "uyvy" : "bgra"
         const packed = packStreamFrame(frame.data, frame.width, frame.height, frame.stride || 0, format)
-        if (!packed) return
+        if (!packed) return false
 
-        sendFrame("OMT", id, this.outputsFor(id), packed)
+        return sendFrame("OMT", id, this.outputsFor(id), packed)
     }
 
     static stop(data: { id: string; outputId?: string } | null = null): Promise<void> {
@@ -743,10 +784,12 @@ class Bmd {
 const HANDLERS: { [type: string]: (data: any) => any } = {
     "ndi:find": (data) => Ndi.findStreams(data || {}),
     "ndi:thumbnail": (data) => Ndi.thumbnail(data),
+    "ndi:refresh": (data) => Ndi.refresh(data),
     "ndi:capture": (data) => Ndi.capture(data),
     "ndi:stop": (data) => Ndi.stop(data),
     "omt:find": () => Omt.findStreams(),
     "omt:thumbnail": (data) => Omt.thumbnail(data),
+    "omt:refresh": (data) => Omt.refresh(data),
     "omt:capture": (data) => Omt.capture(data),
     "omt:stop": (data) => Omt.stop(data),
     videoLayer: (data: { outputId: string; active: boolean; exclusive?: boolean }) => {

@@ -73,7 +73,7 @@
     <canvas bind:this={canvas} style={composited ? "visibility: hidden;" : ""} />
 {:else}
     <!-- class="context #screen_card" -->
-    <Card outlineColor={findMatchingOut(screen.id, $outputs)} active={findMatchingOut(screen.id, $outputs) !== null} on:click title={screen.name} label={screen.name} {loaded} icon="ndi" white showPlayOnHover>
+    <Card outlineColor={findMatchingOut(screen.id, $outputs)} active={findMatchingOut(screen.id, $outputs) !== null} on:click title={screen.name} label={screen.name} {loaded} icon="ndi" white showPlayOnHover showRefreshOnHover on:refresh={() => send(NDI, ["REFRESH_STREAM"], { source: screen })}>
         <SelectElem style="display: flex;" id="ndi" data={{ id: screen.id, type: "ndi", name: screen.name }} draggable>
             <canvas bind:this={canvas} />
         </SelectElem>
