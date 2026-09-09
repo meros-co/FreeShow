@@ -99,13 +99,19 @@ fires whether or not a new frame exists.
 | GPU downscale (single scaled output) | full | full | full |
 | **Per-consumer scaled targets** | full | written, needs a Mac | builds + shaders compile (WSL) |
 | **I420 target (RTMP)** | full | written, needs a Mac | builds + shaders compile (WSL) |
-| **Video-layer composite (live input)** | full | **absent** | **absent** |
-| **Cached-frame re-convert** | full | **absent** | **absent** |
-| Two-phase consume/finish | unconditional | conditional | conditional |
+| **Video-layer composite (live input)** | full | written, needs a Mac | builds + shaders compile (WSL) |
+| Two-phase consume/finish | unconditional | unconditional | unconditional |
 | Conversion-correctness harness | full | absent | absent |
 
-Two-phase being conditional matters more than it looks: when it is missing, the whole render group is
-demoted to the main-thread readback loop, which is the path that puts frames on main.
+Two-phase is now installed on every platform. Each backend already degraded to its own CPU path
+internally, so the conditional install bought nothing and cost a great deal: when the exports were
+absent FreeShow demoted the whole render group to a main-process readback, which is the one thing that
+must never happen.
+
+Windows was also dropping the layer for two of its four main formats: a BGRA readback went through a
+plain copy and an RGBA one through a swizzle, and neither composited, so an output whose readback
+landed on either showed the transparent page over black. Both now run the compositing pass. That was a
+live bug in shipped behaviour, found by review rather than by testing.
 
 ### 1.6 The two connection gates
 
