@@ -51,6 +51,9 @@ export class PreviewStream {
         if (!this.port) return
         const ids = memberIds.filter((id) => this.hasSubscribers(id))
         if (!ids.length) return
+        // NOTE: this structured-clones a full preview frame on the main thread every frame.
+        // MessagePortMain's transfer list takes ports only, so it cannot be handed over here; the fix is
+        // for the capture worker to serve the window directly instead of relaying through main.
         this.port.postMessage({ ids, width: size.width, height: size.height, data: new Uint8Array(buffer, byteOffset, byteLength) })
     }
 

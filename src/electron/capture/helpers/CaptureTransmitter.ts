@@ -146,16 +146,19 @@ export class CaptureTransmitter {
 
     // Dispatches downscaled frame from worker to server/stage channels
     static receiveScaledFrame(memberIds: string[], buffer: ArrayBuffer, byteOffset: number, byteLength: number, size: Size) {
-        // the main window's output previews draw this same frame (relayed, no pixel work here)
-        PreviewStream.push(memberIds, buffer, byteOffset, byteLength, size)
-        if (!this.previewViewersConnected()) return
-        const image = nativeImage.createFromBitmap(Buffer.from(buffer, byteOffset, byteLength), size)
-        if (image.isEmpty()) return
-        for (const id of memberIds) {
-            for (const key of ["server", "stage"]) {
-                if (this.channels[`${id}-${key}`]) this.sendFrameToChannel(id, key, image)
+        if (this.previewViewersConnected()) {
+            // createFromBitmap copies, so the buffer is free again once the image exists
+            const image = nativeImage.createFromBitmap(Buffer.from(buffer, byteOffset, byteLength), size)
+            if (!image.isEmpty()) {
+                for (const id of memberIds) {
+                    for (const key of ["server", "stage"]) {
+                        if (this.channels[`${id}-${key}`]) this.sendFrameToChannel(id, key, image)
+                    }
+                }
             }
         }
+        // last use of the buffer, so the window is handed it rather than given a clone of it
+        PreviewStream.push(memberIds, buffer, byteOffset, byteLength, size)
     }
 
     static getTimeSinceLastChange(captureId: string): number {
