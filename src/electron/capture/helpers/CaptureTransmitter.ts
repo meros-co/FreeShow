@@ -10,6 +10,7 @@ import { getConnections, getStageStreamSubscriberIds, toServer, toStageStreamSub
 import { RtmpBridge as RtmpStreamer } from "../../streaming/RtmpBridge"
 import { WebRtcHost } from "../../streaming/WebRtcHost"
 import { CaptureHelper } from "../CaptureHelper"
+import { ruleViolation } from "../../utils/ruleCheck"
 import { PreviewStream } from "../PreviewStream"
 
 export type Channel = {
@@ -313,6 +314,7 @@ export class CaptureTransmitter {
         return nativeImage.createFromBitmap(raw.buffer, raw.size)
     }
 
+    // every consumer below reads the frame back with toBitmap and may resize or encode it, all on main
     static transmitFrame(captureId: string, image: NativeImage | null, captureTimestamp?: number, raw?: { buffer: Buffer; size: Size; format?: number }) {
         const frameTimestamp = captureTimestamp ?? performance.now()
         const captureOptions = OutputHelper.getOutput(captureId)?.captureOptions
@@ -508,6 +510,7 @@ export class CaptureTransmitter {
         // for frames that would be dropped anyway (avoids ~33MB/frame of throwaway allocation at 4K).
         if (NdiSender.isBusyNDI(captureId)) return
 
+        ruleViolation("main-frame", "toBitmap")
         const buffer = image.toBitmap()
 
         const output = OutputHelper.getOutput(captureId)
@@ -524,6 +527,7 @@ export class CaptureTransmitter {
         // skip the toBitmap readback for frames the busy worker would drop anyway
         if (OmtSender.isBusyOMT(captureId)) return
 
+        ruleViolation("main-frame", "toBitmap")
         const buffer = image.toBitmap()
         if (this.shouldSkipUnchangedNonBlackmagicFrame("omt", captureId, buffer, size)) return
 
@@ -537,6 +541,8 @@ export class CaptureTransmitter {
     }
 
     private static convertToRGBA(buffer: Buffer): void {
+        // a full-frame channel swap, on the main thread
+        ruleViolation("main-frame", "convertToRGBA")
         if (this.IS_BIG_ENDIAN) util.ImageBufferAdjustment.ARGBtoRGBA(buffer)
         else util.ImageBufferAdjustment.BGRAtoRGBA(buffer)
     }
@@ -601,6 +607,7 @@ export class CaptureTransmitter {
         const stageWanted = getConnections("STAGE") > 0 && getStageStreamSubscriberIds().length > 0
         if (!stageWanted && !this.requestList.length) return
 
+        ruleViolation("main-frame", "toBitmap")
         const buffer = image.toBitmap()
         const size = image.getSize()
         if (this.shouldSkipUnchangedNonBlackmagicFrame("stage", captureId, buffer, size)) return
@@ -644,6 +651,7 @@ export class CaptureTransmitter {
         // image = image.resize({ width: size.width / 3, height: size.height / 3, quality: "good" })
         // image = this.resizeImage(image, size, { width: size.width / 3, height: size.height / 3 })
 
+        ruleViolation("main-frame", "toBitmap")
         const buffer = image.toBitmap() // {scaleFactor: 0.5}
         const size = image.getSize()
         if (this.shouldSkipUnchangedNonBlackmagicFrame("server", outputId, buffer, size)) return
@@ -657,6 +665,7 @@ export class CaptureTransmitter {
     static sendBufferToWebRtcHost(outputId: string, image: NativeImage) {
         if (!image || !WebRtcHost.isRunning()) return
 
+        ruleViolation("main-frame", "toBitmap")
         const buffer = image.toBitmap()
         const size = image.getSize()
         if (this.shouldSkipUnchangedNonBlackmagicFrame("webrtc", outputId, buffer, size)) return
@@ -670,6 +679,7 @@ export class CaptureTransmitter {
     static sendBufferToRtmpStreamer(outputId: string, image: NativeImage) {
         if (!image || !RtmpStreamer.isRunning(outputId)) return
 
+        ruleViolation("main-frame", "toBitmap")
         const buffer = image.toBitmap()
         const size = image.getSize()
         if (this.shouldSkipUnchangedNonBlackmagicFrame("rtmp", outputId, buffer, size)) return

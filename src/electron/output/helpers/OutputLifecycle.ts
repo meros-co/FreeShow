@@ -8,6 +8,7 @@ import { WebRtcHost } from "../../streaming/WebRtcHost"
 import { gpuCompositingAvailable, gpuStateSettled } from "../../utils/gpu"
 import { initializeSender } from "../../blackmagic/bmdTalk"
 import { CaptureHelper } from "../../capture/CaptureHelper"
+import { ruleViolation } from "../../utils/ruleCheck"
 import { StreamReceiverHost } from "../../capture/StreamReceiverHost"
 import { NdiSender } from "../../ndi/NdiSender"
 import { setDataNDI } from "../../ndi/talk"
@@ -938,6 +939,7 @@ export class OutputLifecycle {
                     if (!cpuFallback) {
                         cpuFallback = true
                         console.warn(`[OSR ${id}] paint carries no GPU shared texture — falling back to CPU capture`)
+                        ruleViolation("fallback", "paint without a shared texture")
                     }
                     lastCpuImage = image
                 }
@@ -986,6 +988,8 @@ export class OutputLifecycle {
             lastReadback = Date.now()
             if (STATS) sReadback++
             const seq = ++dispatchSeq
+            // the readback lands in the main process on this path
+            ruleViolation("main-frame", "readback into main")
             addon
                 .readback(source, width, height, requestedFormat, id)
                 .then((buf: Buffer) => {

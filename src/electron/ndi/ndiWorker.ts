@@ -1,4 +1,5 @@
 import { parentPort } from "worker_threads"
+import { ruleViolation } from "../utils/ruleCheck"
 import { loadOMT } from "../omt/omtModule"
 import { RtmpStreamer, setRtmpNoticeListener, setRtmpStatusListener } from "../streaming/RtmpStreamer"
 import { BlackmagicSender } from "../blackmagic/BlackmagicSender"
@@ -844,6 +845,8 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
         const tFan = performance.now()
         type FrameBuf = { pbuf: PacerBuf; width: number; height: number; format: number }
         const convertBgra = (bgra: Buffer, w: number, h: number, f: number): Buffer => {
+            // every branch below walks the frame on a CPU core, which the GPU convert exists to avoid
+            ruleViolation("cpu-frame", "worker convert format " + f)
             if (f === 2) return osr.convertBgraToUyva ? osr.convertBgraToUyva(bgra, w, h) : bgraToUyva(bgra, w, h)
             if (f === 1) return osr.convertBgraToUyvy ? osr.convertBgraToUyvy(bgra, w, h) : bgraToUyvy(bgra, w, h)
             if (f === 4) return bgraToI420(bgra, w, h)
@@ -876,6 +879,7 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             targets.forEach((t, i) => targetBufs.push({ pbuf: targetPbufs[i], width: t.width, height: t.height, format: t.format }))
         } else if (targets.length && format === 0 && typeof osr.downscaleBgra === "function") {
             for (const t of targets) {
+                ruleViolation("cpu-frame", "worker downscale for a target")
                 const small: Buffer = osr.downscaleBgra(buffer, size.width, size.height, t.width, t.height)
                 targetBufs.push({ pbuf: intoPacerBuf(`${id}#t`, convertBgra(small, t.width, t.height, t.format)), width: t.width, height: t.height, format: t.format })
             }
