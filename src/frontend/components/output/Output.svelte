@@ -300,7 +300,11 @@
 
     // values
     // a composited stream (see streamLayer) is behind the page, so the background must let it through
-    $: backgroundColor = currentOutput.transparent || $compositedOutputs[outputId] ? "transparent" : styleTemplate?.settings?.backgroundColor || currentSlide?.settings?.color || currentStyle.background || slide?.settings?.backgroundColor || "black"
+    // Only the captured output window itself goes transparent for the composite; the worker draws the
+    // video underneath the page there. A mirror is an ordinary copy drawn in this window, so making it
+    // transparent showed nothing, and Zoomed animates a background colour change, so it faded to black
+    // for the best part of a second every time an input was triggered.
+    $: backgroundColor = currentOutput.transparent || (!mirror && $compositedOutputs[outputId]) ? "transparent" : styleTemplate?.settings?.backgroundColor || currentSlide?.settings?.color || currentStyle.background || slide?.settings?.backgroundColor || "black"
     // background image
     $: styleBackground = currentStyle?.clearStyleBackgroundOnText && (slide || background) ? "" : currentStyle?.backgroundImage || ""
     $: styleBackgroundData = { path: styleBackground, ...($media[styleBackground] || {}), loop: true }

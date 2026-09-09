@@ -5,7 +5,6 @@
     import { onPreviewFrame } from "../../../utils/previewPort"
     import { send } from "../../../utils/request"
     import { StreamCanvasRenderer } from "../../drawer/live/streamCanvas"
-    import { compositedOutputs } from "../../drawer/live/streamLayer"
     import Icon from "../../helpers/Icon.svelte"
     //import { currentWindow, outputs, styles } from "../../../stores"
     import { getResolution } from "../../helpers/output"
@@ -39,44 +38,17 @@
     $: drawnWidth = Math.round(width * (window.devicePixelRatio || 1))
     $: if (subscribedId && drawnWidth) send(OUTPUT, ["PREVIEW_SIZE"], { id: subscribedId, subscriber, width: drawnWidth })
 
-    // The preview must never be blank. Capture frames arrive only once the output's capture is running
-    // (and only on the off-main capture path), so the mirrored output stays on screen until frames flow,
-    // and comes back if they stop. "Stopped" is judged against the measured arrival interval, not a
-    // fixed time: no frame for several measured intervals means the capture is not feeding us.
-    let liveCapture = false
-    let lastFrameAt = 0
-    let frameInterval = 0
-    let staleTimer: ReturnType<typeof setTimeout> | null = null
+    // The preview must never be blank. The mirrored output stays on screen until the first capture frame
+    // arrives; after that the canvas always holds a frame, so it is never taken away again. Flipping back
+    // to the mirror was what produced the black flashes when triggering an input: the mirror's own stream
+    // canvas receives no frames and renders black, and the capture rate swings sharply around a trigger.
+    let hadFrame = false
     function noteFrame() {
-        const now = performance.now()
-        if (lastFrameAt) {
-            const gap = now - lastFrameAt
-            // rise immediately, fall slowly: when the capture rate drops (a receiver disconnects and
-            // admission backs off), a slow-rising average declares the capture stale within one frame and
-            // flips the preview back to the mirror, which reads as a flicker
-            frameInterval = frameInterval ? Math.max(gap, frameInterval * 0.8 + gap * 0.2) : gap
-        }
-        lastFrameAt = now
-        if (frameInterval) {
-            liveCapture = true
-            if (staleTimer) clearTimeout(staleTimer)
-            staleTimer = setTimeout(() => {
-                liveCapture = false
-                staleTimer = null
-            }, frameInterval * 4)
-        }
+        hadFrame = true
     }
     function resetLive() {
-        liveCapture = false
-        lastFrameAt = 0
-        frameInterval = 0
-        if (staleTimer) clearTimeout(staleTimer)
-        staleTimer = null
+        hadFrame = false
     }
-
-    // While the worker composites the live input, the output page draws nothing on purpose, so the
-    // mirrored copy below would be empty. Hold the last capture frame instead of flashing to it.
-    $: composited = !!$compositedOutputs[outputId]
 
     $: subscribePreview(captured && !stageOutput ? outputId : "")
     function subscribePreview(id: string) {
@@ -107,9 +79,9 @@
         <StageLayout {outputId} stageId={stageOutput} preview={!disableTransitions} edit={false} />
     {:else}
         {#if captured}
-            <canvas class="capturePreview" class:hidden={!liveCapture && !composited} bind:this={previewCanvas} />
+            <canvas class="capturePreview" class:hidden={!hadFrame} bind:this={previewCanvas} />
         {/if}
-        {#if !captured || (!liveCapture && !composited)}
+        {#if !captured || !hadFrame}
             <Output {outputId} style={getStyleResolution(resolution, fullscreen ? width : resolution.width, fullscreen ? height : resolution.height, "fit")} mirror preview={!disableTransitions} />
         {/if}
     {/if}
