@@ -97,8 +97,8 @@ fires whether or not a new frame exists.
 | Shared-texture capture | full | full | full |
 | GPU convert BGRA to UYVY / UYVA / RGBA | full | full | full |
 | GPU downscale (single scaled output) | full | full | full |
-| **Per-consumer scaled targets** | full | **absent** | **absent** |
-| **I420 target (RTMP)** | full | **absent** | **absent** |
+| **Per-consumer scaled targets** | full | written, unverified | written, unverified |
+| **I420 target (RTMP)** | full | written, unverified | written, unverified |
 | **Video-layer composite (live input)** | full | **absent** | **absent** |
 | **Cached-frame re-convert** | full | **absent** | **absent** |
 | Two-phase consume/finish | unconditional | conditional | conditional |
@@ -227,11 +227,9 @@ re-reading the full source per target.
 **3.4 The preview downscale becomes a GPU target** rather than a floating-point loop in the receive
 process.
 
-**3.5 Paint-independent output, done properly and on all three platforms.** A composited output should
-produce a frame per arriving video frame, not per page paint, using a cached page frame in the addon.
-My first attempt is the uncommitted experiment and it was slower; the reason is that repeats serialise
-against the capture pipeline and the pacer. Redo it with the repeat sharing the pipeline's admission
-and depth accounting rather than running beside it.
+**3.5 Not needed. Removed.** This item existed because the output sat at 37 frames per second against a
+source I believed was running at 60. It was not. See the measurements section: the output path reaches
+the source rate on both paths, and the page paint rate is not a limiter.
 
 **3.6 Bound every queue and time out every wait.** The Linux GL job queue is uncapped, and a target
 whose page stops acking stalls permanently.
@@ -271,7 +269,35 @@ the rest. Also reconcile the documentation, which claims a compositor switch tha
 
 ---
 
-## Part 3 — Acceptance
+## Part 3 — Measured on Windows, 2026-09-08
+
+Test box: RX 6900 XT, 32 logical cores. Real app, `FS_CAP_STATS=1`, receiver attached via the OMT
+fork's `cross-receive.mjs`. Unique frames per second, repeats excluded.
+
+| configuration | into the worker | out on the wire | paints |
+|---|---|---|---|
+| 4K60 clip on a 4K OMT output | n/a | 60 | 60 |
+| 1080p60 live OMT input on a 4K OMT output | 60 | 54-60 | 55-60 |
+| 4K60 live OMT input on a 4K OMT output | 38-40 | 35-39 | 36-40 |
+
+The third row is not a FreeShow limit. The synthetic 4K sender encodes on the CPU on the same machine
+and only produced 36-39 frames per second while FreeShow was running; FreeShow passed on essentially
+every frame it was given. An earlier report of "37 against a 60 source" was this artifact, and it very
+nearly cost a large and pointless rebuild of the capture pipeline.
+
+Also ruled out by measurement: pipeline depth. Forcing the derived depth from 2 to 4 changed nothing
+(36-39 either way), so in-flight readback occupancy is not a limiter either.
+
+**Test rig rule.** Never measure the input path with a synthetic 4K sender running on the same machine.
+Use a hardware source, a second machine, or a locally decoded clip, and always report what the source
+actually delivered alongside what came out.
+
+**Still unmeasured:** several concurrent 4K60 outputs with receivers on all of them, which is the real
+bar. That needs a second output enabled in the app settings.
+
+---
+
+## Part 4 — Acceptance
 
 Every phase reports, from the Phase 0 command, on each platform:
 
