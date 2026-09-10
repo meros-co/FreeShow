@@ -19,6 +19,9 @@ export class OutputSend {
             if (msg.channel === "OUTPUTS") tempMsg = onlySendToMatchingId(tempMsg, output.id)
 
             output.window.webContents.send(OUTPUT, tempMsg)
+            // the offscreen capture surface renders the same output, so it needs the same data
+            const surface = (output as any).captureWindow
+            if (surface && !surface.isDestroyed()) surface.webContents.send(OUTPUT, tempMsg)
 
             // if (!output.previewWindow || output.previewWindow.isDestroyed()) return
             // output.previewWindow.webContents.send(OUTPUT, tempMsg)
@@ -37,6 +40,8 @@ export class OutputSend {
         // a shared-render follower's window is the renderer's — don't inject the follower's data into it
         if (!output?.window || output.window.isDestroyed() || (output as any).follower) return
         output.window.webContents.send(channel, msg)
+        const surface = (output as any).captureWindow
+        if (surface && !surface.isDestroyed()) surface.webContents.send(channel, msg)
         // if (!output.previewWindow || output.previewWindow.isDestroyed()) return
         // output.previewWindow.webContents.send(OUTPUT, msg)
     }

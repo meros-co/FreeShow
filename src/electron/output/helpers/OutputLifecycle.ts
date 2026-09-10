@@ -298,6 +298,75 @@ export class OutputLifecycle {
         return !!(output.ndi || output.omt || output.webrtc || output.rtmp || output.blackmagic || output.invisible)
     }
 
+    // A displayed output needs a real on-screen window, and capturing that window means capturePage on
+    // the main thread — the one thing no video path may do. While such an output is actually captured,
+    // render the same content a second time into a hidden offscreen surface and capture that instead:
+    // the frame arrives as a GPU texture the worker converts, and the visible window keeps displaying.
+    // The surface exists only while a capture is running, so an output nobody watches renders once.
+    static createCaptureSurface(id: string): BrowserWindow | null {
+        const output = OutputHelper.getOutput(id)
+        if (!output || (output as any).follower || output.osr) return null
+
+        const existing = output.captureWindow
+        if (existing && !existing.isDestroyed()) return existing
+
+        const bounds = output.intendedBounds
+        if (!bounds) return null
+
+        // hidden windows are rendered DPI-corrected, so ask for the size that yields the configured pixels
+        const renderBounds = OutputHelper.Bounds.getRenderBounds({ invisible: true }, bounds)
+        const options: BrowserWindowConstructorOptions = { ...outputOptions, ...renderBounds, show: false, skipTaskbar: true, alwaysOnTop: false, backgroundColor: output.transparent ? "#00000000" : "#000000" }
+        const useSharedTexture = this.useSharedTextureCapture()
+        options.webPreferences = { ...outputOptions.webPreferences, offscreen: useSharedTexture ? { useSharedTexture: true } : true } as any
+        this.avoidLinuxDisplaySizeShrink(options)
+
+        const window = new BrowserWindow(options)
+        window.setSkipTaskbar(true)
+        this.attachOsrCapture(window, id)
+        loadWindowContent(window, "output")
+
+        output.captureWindow = window
+        output.osr = true
+        return window
+    }
+
+    static destroyCaptureSurface(id: string) {
+        const output = OutputHelper.getOutput(id)
+        const window = output?.captureWindow
+        if (!output || !window) return
+
+        output.captureWindow = undefined
+        output.osr = false
+        this.stopOsrPaintDrive(id)
+        try {
+            this.osrCaptureAddon?.releasePool?.(id)
+        } catch {
+            // ignore
+        }
+        if (window.isDestroyed()) return
+        try {
+            window.removeAllListeners("close")
+            window.destroy()
+        } catch (err) {
+            console.error(err)
+        }
+    }
+
+    // The worker is producing this output's scaled frames. Consumers served that way (OutputShow, stage)
+    // must not also be served from main, or a moment where the off-main path declines one frame leaves the
+    // main-side timer re-sending a stale one beside the worker's fresh ones.
+    private static offMainAt = new Map<string, number>()
+    private static readonly OFF_MAIN_ACTIVE_MS = 1000
+
+    static noteOffMain(id: string) {
+        this.offMainAt.set(id, Date.now())
+    }
+
+    static isOffMainActive(id: string): boolean {
+        const at = this.offMainAt.get(id)
+        return !!at && Date.now() - at < this.OFF_MAIN_ACTIVE_MS
+    }
+
     static readonly OSR_RENDER_FPS = 60
 
     private static attachOsrCapture(window: BrowserWindow, id: string) {
@@ -846,6 +915,7 @@ export class OutputLifecycle {
                 OutputLifecycle.globalInFlight++
                 offMainInFlight++
                 heldTextures.set(seq, tex)
+                for (const m of members) OutputLifecycle.noteOffMain(m)
                 if (STATS) {
                     sForward++
                     if (idleSince) {
@@ -1011,6 +1081,10 @@ export class OutputLifecycle {
             const groupInfo = CaptureHelper.Transmitter.groupOffMainInfo(offMainIds.length ? offMainIds : members)
             const canOffMain = groupInfo.eligible && (offMainIds.length > 0 || groupInfo.needsScaled)
             if (canOffMain) {
+                // the worker now owns delivery for this frame: drop anything main was still holding, or the
+                // send timer keeps re-transmitting a stale frame alongside the worker's fresh one
+                lastRaw = null
+                lastCpuImage = null
                 OutputLifecycle.noteFrameSize(id, width * height)
                 if (pendingFrame) {
                     if (STATS) sDropInterval++

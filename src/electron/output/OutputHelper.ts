@@ -88,6 +88,12 @@ export class OutputHelper {
         return Object.entries(this.outputs).map(([id, output]) => ({ ...output, id }))
     }
 
+    // the window a capture reads from: the offscreen surface when one exists, else the output's own window
+    static renderWindow(output: OutputData | undefined) {
+        const win = output?.captureWindow && !output.captureWindow.isDestroyed() ? output.captureWindow : output?.window
+        return win && !win.isDestroyed() ? win : undefined
+    }
+
     static setOutput(id: string, output: OutputData) {
         this.outputs[id] = output
     }

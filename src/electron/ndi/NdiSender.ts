@@ -247,7 +247,11 @@ export class NdiSender {
         // the render is shared: any member with an NDI sender, or any OMT sender in the shared worker
         // (opts.omt), keeps the capture going without an NDI sender on the renderer itself
         const anyNdi = (opts.members?.length ? opts.members : [id]).some((m) => this.NDI[m]?.sender)
-        const anyWorkerConsumer = Object.keys(opts.webrtcMembers || {}).length > 0 || Object.keys(opts.rtmpMembers || {}).length > 0
+        // an output with no sender at all still has work for the worker when something asked the GPU for a
+        // scaled frame: an OutputShow or stage viewer, or a preview. Refusing those sent the frame back to
+        // main to be read, converted and encoded there.
+        const wantsScaled = !!opts.stageStream || !!opts.serverStream || ((opts.dstW || 0) > 0 && (opts.dstH || 0) > 0)
+        const anyWorkerConsumer = Object.keys(opts.webrtcMembers || {}).length > 0 || Object.keys(opts.rtmpMembers || {}).length > 0 || wantsScaled
         if ((!anyNdi && !opts.omt && !anyWorkerConsumer) || !this.getWorker()) return false
         this.worker!.postMessage({ type: "captureFrame", id, source, opts })
         return true

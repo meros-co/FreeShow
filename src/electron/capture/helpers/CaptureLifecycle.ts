@@ -49,7 +49,9 @@ export class CaptureLifecycle {
         const toggleHasActive = Object.values(toggle).some(Boolean)
         if (!toggleHasActive) return
 
-        if (!output.captureOptions) output.captureOptions = CaptureHelper.getDefaultCapture(output.window, id)
+        // a displayed output is captured from a hidden offscreen surface, never with capturePage on main
+        OutputHelper.Lifecycle.createCaptureSurface(id)
+        if (!output.captureOptions) output.captureOptions = CaptureHelper.getDefaultCapture(OutputHelper.renderWindow(output) || output.window, id)
         const captureOptions = output.captureOptions
 
         // toggle values
@@ -221,6 +223,7 @@ export class CaptureLifecycle {
 
         OutputHelper.Lifecycle.releaseOsrCaptureTextures(id)
         if (!(output as any).follower) this.cleanupListeners(capture.window)
+        OutputHelper.Lifecycle.destroyCaptureSurface(id)
         delete output.captureOptions
         this.updateWebRtcHostState()
         this.updateRtmpState()

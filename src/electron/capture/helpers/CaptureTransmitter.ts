@@ -206,9 +206,14 @@ export class CaptureTransmitter {
             const px = raw?.size ? raw.size.width * raw.size.height : image ? image.getSize().width * image.getSize().height : 0
             const heavyConsumerCap = px > 4_000_000 ? 12 : px > 2_000_000 ? 20 : Infinity
 
+            // OutputShow and stage frames are produced by the GPU and delivered by the worker whenever the
+            // off-main pipeline is running for this output; serving them from main too would double-send
+            const offMain = OutputHelper.Lifecycle.isOffMainActive(captureId)
+
             const firing: Channel[] = []
             for (const channel of Object.values(this.channels)) {
                 if (channel.captureId !== captureId) continue
+                if (offMain && (channel.key === "server" || channel.key === "stage")) continue
 
                 let fps = framerates?.[channel.key] || 30
                 if (!this.BUFFER_CONSUMERS.has(channel.key)) fps = Math.min(fps, heavyConsumerCap)
