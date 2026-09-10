@@ -186,9 +186,11 @@ main-thread loop.
 **1.7 A conversion-correctness harness for Metal and GLES,** matching the Windows one, including the
 documented float-versus-integer rounding difference between the GPU and CPU downscale.
 
-### Phase 2 — Delete the main-process frame paths
+### Phase 2 — Delete the main-process frame paths — DONE except 2.9
 
-With Phase 1 done, these paths have no remaining justification.
+With Phase 1 done, these paths have no remaining justification. 2.1-2.8 are implemented and verified:
+a 45-second run at 4K60 with an OutputShow client, the app-window preview and the display window all
+live produced one `[RULE-CHECK]` line, at startup, before the off-main pipeline engaged.
 
 **2.1 One capture path.** The shared-texture off-main path becomes the only path for captured outputs.
 Remove the `hasGpuDownscale` demotion and the `canOffMain` branch that resolves a full readback into
