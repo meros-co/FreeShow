@@ -42,11 +42,12 @@ node -e '
 const a = require("./build/Release/osr_readback.node")
 const backend = typeof a._readbackBackend === "function" ? a._readbackBackend() : "n/a"
 console.log("backend:", backend)
-console.log("targetsSupported:", a.targetsSupported)
-console.log("videoLayerSupported:", a.videoLayerSupported)
-console.log("readbackConsume:", typeof a.readbackConsume === "function")
 if (backend !== "egl-gles3") { console.error("GPU path did not come up: shaders may have failed to compile"); process.exit(1) }
 ' || fail "module load / GL init failed"
+
+echo "== capability parity (the same contract every platform must meet) =="
+# check the contract against the module just built here, not whatever the checkout happens to hold
+OSR_MODULE="$NODE_BUILD/build/Release/osr_readback.node" node "$(dirname "$0")/capability-check.cjs" || fail "the Linux backend does not meet the capability contract"
 
 echo "== electron build in the checkout (what the app actually loads) =="
 cd "$APP" || fail "cd failed"

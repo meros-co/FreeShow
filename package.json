@@ -64,7 +64,8 @@
         "lint:electron": "eslint -c config/linting/eslint.electron.json --ext .js,.ts src/electron --fix",
         "lint:frontend": "eslint -c config/linting/eslint.frontend.json --ext .js,.ts src/frontend --fix",
         "lint:svelte": "eslint -c config/linting/eslint.svelte.js --ext .svelte src/frontend --fix",
-        "lint:styles": "npx stylelint 'src/frontend/**/*.{css,scss,svelte}' --config config/linting/.stylelintrc.json"
+        "lint:styles": "npx stylelint 'src/frontend/**/*.{css,scss,svelte}' --config config/linting/.stylelintrc.json",
+        "check-capabilities": "electron scripts/capability-check.cjs"
     },
     "devDependencies": {
         "@electron/notarize": "^2.5.0",

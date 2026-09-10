@@ -269,15 +269,21 @@ outputs that have no NDI member, and the render rate ignores any configured valu
 
 ### Phase 5 — Parity as a gate, not an aspiration
 
-**5.1 The addon reports its capabilities, and a test asserts none are missing on any platform.** A new
-Windows-only capability fails that test until the other two backends have it.
+**5.1 DONE.** `scripts/capability-check.cjs` holds the contract - every capability the app relies on,
+listed once - and asserts it against the addon built for the platform it runs on. `npm run
+check-capabilities` runs it under Electron so the ABI matches the app's; `scripts/wsl-linux-check.sh`
+runs it against the Linux build. Both pass 19/19 today. A capability added for one backend has to be
+added to the list, and the check then fails on the others until they have it. Verified failing: adding
+an entry the addon does not export exits 1 and names it.
 
 **5.2 The Phase 0 benchmark runs on all three platforms** for each phase, with numbers recorded. You
 have a second Windows box and a Mac; Linux needs a target machine identified.
 
-**5.3 Packaging.** Name `osr-capture` explicitly in `asarUnpack` on all three platforms instead of
-relying on auto-detection, and reconcile the `grandiose` and `libltc-wrapper` entries that exist on
-Linux only.
+**5.3 DONE.** Every platform now unpacks the same set of native modules: `osr-capture` (which was named
+nowhere and left to auto-detection, though the preload and the capture worker both map it),
+`openmediatransport`, `grandiose` and `libltc-wrapper` (Linux only before), `macadam`, and `sharp`
+(a native module the capture worker started using for stage and thumbnail encodes). `libspotifyctl`
+stays Windows-only, being an optional dependency. Not verified by a packaged build.
 
 **5.4 Retire the Linux-only workarounds** where Phase 1 and Phase 3 make them unnecessary, and derive
 the rest. Also reconcile the documentation, which claims a compositor switch that is not in the code.
