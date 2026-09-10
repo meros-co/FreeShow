@@ -20,6 +20,7 @@ export type CaptureFrameOpts = {
     convertCheck?: boolean // FS_CONVERT_CHECK: take the frame as BGRA too so the worker can check the GPU convert
     stageStream?: { width: number; height: number; quality: number; intervalMs: number } | null // subscribed stage clients
     serverStream?: { width: number; height: number; intervalMs: number } | null // connected OutputShow clients
+    thumbStream?: { width: number; height: number; quality: number } | null // a remote controller waiting for one frame
     mainFormat?: number // the format full-size members send in (differs from `format` only on the CPU-target path)
     transparent?: boolean
     dstW?: number
@@ -89,6 +90,7 @@ export class NdiSender {
     // WebRTC host wiring (`webrtc*` messages from the worker's frame server)
     static webrtcMessageHandler: ((msg: any) => void) | null = null
     static presentMessageHandler: ((msg: any) => void) | null = null
+    static previewMessageHandler: ((msg: any) => void) | null = null
     // live input composited into a capture (`video*` messages)
     static videoLayerHandler: ((msg: any) => void) | null = null
 
@@ -118,6 +120,10 @@ export class NdiSender {
         }
         if (String(msg.type).startsWith("bmd")) {
             this.bmdMessageHandler?.(msg)
+            return
+        }
+        if (String(msg.type).startsWith("preview")) {
+            this.previewMessageHandler?.(msg)
             return
         }
         if (String(msg.type).startsWith("present")) {
@@ -164,13 +170,11 @@ export class NdiSender {
         } else if (msg.type === "serverFrame") {
             // produced as RGBA by the GPU; main forwards the bytes untouched
             CaptureHelper.Transmitter.sendServerFrame(msg.id, msg.buffer, msg.size)
+        } else if (msg.type === "thumbJpeg") {
+            CaptureHelper.Transmitter.sendControllerThumbnail(msg.id, msg.jpeg, msg.size)
         } else if (msg.type === "stageJpeg") {
             // already encoded in the worker; main only forwards the bytes
             CaptureHelper.Transmitter.sendStageJpeg(msg.id, msg.jpeg, msg.size)
-        } else if (msg.type === "scaledFrame") {
-            // the worker GPU-downscaled the 4K readback to a small BGRA (server/stage) and copied it here;
-            // main wraps the small image once and fans it out to every group member's server/stage consumers
-            CaptureHelper.Transmitter.receiveScaledFrame(msg.members || [msg.id], msg.buffer, msg.byteOffset, msg.byteLength, msg.size)
         }
     }
 
@@ -261,7 +265,7 @@ export class NdiSender {
         // scaled frame: an OutputShow or stage viewer, or a preview. Refusing those sent the frame back to
         // main to be read, converted and encoded there.
         const wantsScaled = !!opts.stageStream || !!opts.serverStream || ((opts.dstW || 0) > 0 && (opts.dstH || 0) > 0)
-        const anyWorkerConsumer = Object.keys(opts.webrtcMembers || {}).length > 0 || Object.keys(opts.rtmpMembers || {}).length > 0 || Object.keys(opts.presentMembers || {}).length > 0 || wantsScaled
+        const anyWorkerConsumer = Object.keys(opts.webrtcMembers || {}).length > 0 || Object.keys(opts.rtmpMembers || {}).length > 0 || Object.keys(opts.presentMembers || {}).length > 0 || !!opts.thumbStream || wantsScaled
         if ((!anyNdi && !opts.omt && !anyWorkerConsumer) || !this.getWorker()) return false
         this.worker!.postMessage({ type: "captureFrame", id, source, opts })
         return true

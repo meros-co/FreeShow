@@ -133,7 +133,6 @@ export const currentOutputSettings: Writable<string | null> = writable(null)
 export const slideTimers: Writable<{ [key: string]: SlideTimer }> = writable({})
 export const outputCache: Writable<any> = writable(null)
 export const outputSlideCache: Writable<any> = writable({})
-export const previewBuffers: Writable<any> = writable({})
 export const ndiData: Writable<any> = writable({})
 export const omtData: Writable<any> = writable({})
 export const closeAd: Writable<boolean> = writable(false)
@@ -357,6 +356,9 @@ export const styles: Writable<{ [key: string]: Styles }> = writable({}) // {}
 
 // OUTPUTS
 export const outputs: Writable<Outputs> = writable({}) // {default}
+// outputs a capture is currently running for, so a preview of one takes the captured frame instead of
+// rendering (and decoding) the content again - written by shouldBeCaptured()
+export const capturedOutputs: Writable<{ [id: string]: boolean }> = writable({})
 // this output window draws the capture instead of rendering its content (the offscreen capture surface
 // is the only render of it) - see electron/output/helpers/OutputPresenter.ts
 export const presenting: Writable<boolean> = writable(false)

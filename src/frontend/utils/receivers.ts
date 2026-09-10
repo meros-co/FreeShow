@@ -48,7 +48,6 @@ import {
     playingAudioPaths,
     playingVideoState,
     popupData,
-    previewBuffers,
     projects,
     shows,
     showsCache,
@@ -102,16 +101,6 @@ export function remoteListen() {
 // OUTPUT
 
 const receiveOUTPUTasMAIN: any = {
-    BUFFER: ({ id, time, buffer, size }) => {
-        // this will infinitely increace if this is not in place
-        const timeSinceSent = Date.now() - time
-        if (timeSinceSent > 100) return // skip frames if overloaded
-
-        previewBuffers.update((a) => {
-            a[id] = { buffer, size }
-            return a
-        })
-    },
     OUTPUTS: (a: any) => outputs.set(a),
     RENDER_GROUPS: (a: any) => renderGroups.set(a || {}),
     RESTART: ({ id }) => restartOutputs(id),
@@ -231,22 +220,6 @@ export const receiveOUTPUTasOUTPUT: any = {
         // used for stage mirror data (hacky fix)
         allOutputs.set(a)
     },
-    // only received by stage screen outputs
-    BUFFER: ({ id, time, buffer, size }) => {
-        const timeSinceSent = Date.now() - time
-        if (timeSinceSent > 100) return // skip frames if overloaded
-
-        // WIP only receive the "output capture" from this outputs "stageOutput id"
-        // let outputId = Object.keys(get(outputs))[0]
-        // if (id !== outputId) return
-
-        previewBuffers.update((a) => {
-            a[id] = { buffer, size }
-            return a
-        })
-    },
-    // this window now draws the capture rather than rendering the content a second time
-    PRESENT: ({ active }: { id: string; active: boolean }) => presenting.set(!!active),
     CLOSE_AD: () => closeAd.set(true),
     LANGUAGE: (a: any) => setLanguage(a),
     STYLES: (a: any) => styles.set(a),

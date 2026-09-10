@@ -694,7 +694,7 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
     }
 }
 
-async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } }; bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } }; webrtcMembers?: { [id: string]: { width: number; height: number } }; presentMembers?: { [id: string]: { width: number; height: number } }; convertCheck?: boolean; stageStream?: { width: number; height: number; quality: number; intervalMs: number } | null; serverStream?: { width: number; height: number; intervalMs: number } | null }) {
+async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } }; bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } }; webrtcMembers?: { [id: string]: { width: number; height: number } }; presentMembers?: { [id: string]: { width: number; height: number } }; convertCheck?: boolean; stageStream?: { width: number; height: number; quality: number; intervalMs: number } | null; serverStream?: { width: number; height: number; intervalMs: number } | null; thumbStream?: { width: number; height: number; quality: number } | null }) {
     // seq identifies this in-flight capture; the osr-capture key is slotted so concurrent readbacks
     // for one output use independent pool entries
     const seq = opts.seq ?? 0
@@ -806,8 +806,15 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             releaseTexture()
         }
 
+        // The app window's previews are served straight from here over shared memory. Relaying them
+        // through main structured-cloned a whole preview frame per output per frame on the main thread.
         if (scaled && scaled.length) {
-            port.postMessage({ type: "scaledFrame", id, members, buffer: scaled.buffer, byteOffset: scaled.byteOffset, byteLength: scaled.byteLength, size: { width: dstW, height: dstH } })
+            const server = previewFrames()
+            const now = Date.now()
+            // the addon reuses its scaled buffer for the next readback, and the server may still be
+            // holding this frame waiting for the window, so it gets its own copy - on this thread
+            const frame: ServedFrame = { xres: dstW, yres: dstH, format: "bgra", data: Buffer.from(new Uint8Array(scaled.buffer, scaled.byteOffset, scaled.byteLength)) }
+            for (const m of members) server.deliver(m, "PREVIEW", m, frame, now, true)
         }
 
         const tFan = performance.now()
@@ -1030,6 +1037,14 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             }
         }
 
+        // a remote controller asked for a thumbnail: encode the frame it is already being given rather
+        // than taking a whole new capture of the window on the main thread
+        if (opts.thumbStream) {
+            const cfg = opts.thumbStream
+            const ti = targetBufs.findIndex((t) => t.width === cfg.width && t.height === cfg.height && t.format === 3)
+            if (ti >= 0) encodeThumbFrame(id, targetBufs[ti].pbuf.buf.subarray(0, cfg.width * cfg.height * 4), cfg)
+        }
+
         if (opts.stageStream) {
             const cfg = opts.stageStream
             const ti = targetBufs.findIndex((t) => t.width === cfg.width && t.height === cfg.height && t.format === 3)
@@ -1201,6 +1216,22 @@ function encodeStageFrame(id: string, members: string[], rgba: Buffer, cfg: { wi
         .catch((err: any) => console.error("stage JPEG encode failed:", err.message))
         .finally(() => stageBusy.delete(id))
 }
+const thumbBusy = new Set<string>()
+function encodeThumbFrame(id: string, rgba: Buffer, cfg: { width: number; height: number; quality: number }) {
+    const sharp = loadSharp()
+    if (!sharp || thumbBusy.has(id)) return
+    thumbBusy.add(id)
+    const owned = Buffer.from(rgba)
+    sharp(owned, { raw: { width: cfg.width, height: cfg.height, channels: 4 } })
+        .jpeg({ quality: cfg.quality })
+        .toBuffer()
+        .then((jpeg: Buffer) => {
+            port.postMessage({ type: "thumbJpeg", id, jpeg, size: { width: cfg.width, height: cfg.height } })
+        })
+        .catch((err: any) => console.error("thumbnail JPEG encode failed:", err.message))
+        .finally(() => thumbBusy.delete(id))
+}
+
 // FS_CONVERT_CHECK reports once per output; comparing every frame would swamp the log
 const convertChecked = new Set<string>()
 // outputs whose page has been told the composite is running (so it can stop drawing the frame itself)
@@ -1321,6 +1352,19 @@ function webrtcFrames() {
     return webrtcServer
 }
 
+// The app window's output previews: same transport, so main never touches a preview frame either
+let previewServer: FrameServer | null = null
+function previewFrames() {
+    if (previewServer) return previewServer
+    previewServer = new FrameServer({
+        log: (text) => console.info("[preview frames]", text),
+        onListening: (info) => port.postMessage({ type: "previewWs", port: info.port, token: info.token }),
+        onNeedTarget: (targetId) => port.postMessage({ type: "previewNeedTarget", targetId }),
+        stats: !!process.env.FS_CAP_STATS
+    })
+    return previewServer
+}
+
 // last push per output, so an OutputShow viewer is served at its rate and not at the render rate
 const lastServerPush = new Map<string, number>()
 
@@ -1348,6 +1392,9 @@ function presentFrames() {
 
 port.on("message", (msg: any) => {
     switch (msg?.type) {
+        case "previewReset":
+            if (previewServer) for (const m of Object.keys(previewServer.targets())) previewServer.drop(m)
+            break
         case "presentReset":
             if (presentServer) for (const m of Object.keys(presentServer.targets())) presentServer.drop(m)
             break

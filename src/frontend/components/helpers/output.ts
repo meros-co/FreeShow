@@ -8,7 +8,7 @@ import type { Resolution, Styles } from "../../../types/Settings"
 import type { Item, Layout, LayoutRef, Media, OutSlide, Show, Slide, SlideData, Template, TemplateSettings, Transition } from "../../../types/Show"
 import { AudioAnalyser } from "../../audio/audioAnalyser"
 import { requestMain, sendMain } from "../../IPC/main"
-import { actions, activeFocus, activeProject, activeRename, activeShow, activeTimers, allOutputs, categories, connections, currentOutputSettings, customMessageCredits, disabledServers, effects, focusMode, lockedOverlays, media, outputDisplay, outputs, outputSlideCache, outputState, overlays, overlayTimers, projects, scriptures, scriptureSettings, serverData, showsCache, special, stageShows, styles, templates, theme, themes, transitionData, usageLog } from "../../stores"
+import { actions, activeFocus, capturedOutputs, activeProject, activeRename, activeShow, activeTimers, allOutputs, categories, connections, currentOutputSettings, customMessageCredits, disabledServers, effects, focusMode, lockedOverlays, media, outputDisplay, outputs, outputSlideCache, outputState, overlays, overlayTimers, projects, scriptures, scriptureSettings, serverData, showsCache, special, stageShows, styles, templates, theme, themes, transitionData, usageLog } from "../../stores"
 import { trackScriptureUsage } from "../../utils/analytics"
 import { isMainWindow, isOutputWindow, newToast } from "../../utils/common"
 import { translateText } from "../../utils/language"
@@ -753,6 +753,14 @@ export function shouldBeCaptured(outputId: string, startup = false) {
 
     // alert user that screen recording starts
     if (!startup && Object.values(captures).filter(Boolean).length) newToast("toast.output_capture_enabled")
+
+    const active = Object.values(captures).some(Boolean)
+    capturedOutputs.update((a) => {
+        if (!!a[outputId] === active) return a
+        if (active) a[outputId] = true
+        else delete a[outputId]
+        return a
+    })
 
     send(OUTPUT, ["CAPTURE"], { id: outputId, captures })
 }

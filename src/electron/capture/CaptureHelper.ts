@@ -2,6 +2,7 @@ import type { BrowserWindow, Display, NativeImage, Size } from "electron"
 import electron from "electron"
 import { NdiSender } from "../ndi/NdiSender"
 import { OmtSender } from "../omt/OmtSender"
+import { ruleViolation } from "../utils/ruleCheck"
 import { OutputHelper } from "../output/OutputHelper"
 import { RenderGroups } from "../output/helpers/RenderGroups"
 import type { CaptureOptions } from "./CaptureOptions"
@@ -141,7 +142,9 @@ export class CaptureHelper {
         })
     }
 
+    // Fallback only: an output nothing is capturing has no worker frame a thumbnail could come from.
     static async captureBase64Frame(window: BrowserWindow) {
+        ruleViolation("main-frame", "controller thumbnail capturePage")
         return (await window.capturePage()).toDataURL({ scaleFactor: 0.5 })
     }
 

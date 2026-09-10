@@ -1,6 +1,6 @@
 import { nativeImage, type NativeImage, type Size } from "electron"
 import os from "os"
-import { OUTPUT_STREAM } from "../../../types/Channels"
+import { CONTROLLER, OUTPUT_STREAM } from "../../../types/Channels"
 import { BlackmagicBridge as BlackmagicSender } from "../../blackmagic/BlackmagicBridge"
 import { NdiSender } from "../../ndi/NdiSender"
 import util from "../../ndi/vingester-util"
@@ -21,7 +21,6 @@ export type Channel = {
 }
 export class CaptureTransmitter {
     private static readonly IS_BIG_ENDIAN = os.endianness() === "BE"
-    private static readonly REQUEST_LIST_MAX = 100
     // StageShow "Output window" items: push JPEG frames directly to connected clients
     private static readonly STAGE_PUSH_MIN_INTERVAL_MS = 100 // max 10fps
     private static readonly STAGE_FRAME_MAX_WIDTH = 1280
@@ -35,7 +34,6 @@ export class CaptureTransmitter {
     private static readonly FPS_EPSILON_HIGH = 10.0
     private static readonly FPS_EPSILON_LOW = 1.0
 
-    static requestList: string[] = []
     static channels: { [key: string]: Channel } = {}
     // last time any channel of a capture observed changed frame content (used for idle frame rate backoff)
     private static lastChangeTimes: { [captureId: string]: number } = {}
@@ -135,14 +133,6 @@ export class CaptureTransmitter {
         return { eligible: true, needsScaled: needsScaled && (this.previewViewersConnected() || PreviewStream.hasSubscribers()) }
     }
 
-    // Dispatches downscaled frame from worker to server/stage channels
-    // Only the app window's previews are served from here now. OutputShow and StageShow viewers get their
-    // own frame produced by the GPU and delivered by the worker, so main no longer wraps this buffer in an
-    // image, resizes it, swaps its channels or encodes it.
-    static receiveScaledFrame(memberIds: string[], buffer: ArrayBuffer, byteOffset: number, byteLength: number, size: Size) {
-        PreviewStream.push(memberIds, buffer, byteOffset, byteLength, size)
-    }
-
     static getTimeSinceLastChange(captureId: string): number {
         const lastChange = this.lastChangeTimes[captureId]
         if (lastChange === undefined) return 0
@@ -194,8 +184,15 @@ export class CaptureTransmitter {
 
         const framerates = captureOptions.framerates
 
+        // While the off-main pipeline is running for this output the worker produces and delivers every
+        // consumer's frame from the GPU readback - senders, Blackmagic, WebRTC, RTMP, OutputShow and
+        // stage alike. Serving any of them from main as well would double-send, and would put back the
+        // readback, convert and encode this whole path exists to remove. Checked before anything is
+        // scheduled, so a frame the worker owns costs main no timer either.
+        if (OutputHelper.Lifecycle.isOffMainActive(captureId)) return
+        if (!raw && (!image || image.isEmpty())) return
+
         setImmediate(() => {
-            if (!raw && (!image || image.isEmpty())) return
             this.transmitFrameBody(captureId, image, raw, frameTimestamp, captureOptions, framerates)
         })
     }
@@ -206,14 +203,9 @@ export class CaptureTransmitter {
             const px = raw?.size ? raw.size.width * raw.size.height : image ? image.getSize().width * image.getSize().height : 0
             const heavyConsumerCap = px > 4_000_000 ? 12 : px > 2_000_000 ? 20 : Infinity
 
-            // OutputShow and stage frames are produced by the GPU and delivered by the worker whenever the
-            // off-main pipeline is running for this output; serving them from main too would double-send
-            const offMain = OutputHelper.Lifecycle.isOffMainActive(captureId)
-
             const firing: Channel[] = []
             for (const channel of Object.values(this.channels)) {
                 if (channel.captureId !== captureId) continue
-                if (offMain && (channel.key === "server" || channel.key === "stage")) continue
 
                 let fps = framerates?.[channel.key] || 30
                 if (!this.BUFFER_CONSUMERS.has(channel.key)) fps = Math.min(fps, heavyConsumerCap)
@@ -427,26 +419,6 @@ export class CaptureTransmitter {
         return image
     }
 
-    static sendToRequested(msg: any) {
-        const newList: string[] = []
-
-        const seen = new Set<string>()
-        for (const dataString of this.requestList) {
-            if (seen.has(dataString)) continue
-            seen.add(dataString)
-            const data: { id: string; previewId: string } = JSON.parse(dataString)
-
-            if (data.previewId !== msg.data?.id) {
-                newList.push(JSON.stringify(data))
-                continue
-            }
-
-            OutputHelper.Send.sendToWindow(data.id, msg)
-        }
-
-        this.requestList = newList
-    }
-
     // BLACKMAGIC
     static sendBufferToBlackmagic(captureId: string, image: NativeImage) {
         if (!image || !BlackmagicSender.canAcceptFrame(captureId)) return
@@ -472,29 +444,13 @@ export class CaptureTransmitter {
     }
 
     // MAIN (STAGE OUTPUT)
+    // Legacy path only: reached when an output cannot be captured offscreen, so the worker never sees
+    // its frame. Connected stage clients otherwise get a frame the GPU produced and the worker encoded.
     static sendBufferToMain(captureId: string, image: NativeImage) {
         if (!image) return
+        if (getConnections("STAGE") === 0 || getStageStreamSubscriberIds().length === 0) return
 
-        // toBitmap is a full-frame allocation and copy (~33MB at 4K). Nothing below needs it unless a
-        // stage client or a preview is actually waiting for this output, so establish that first.
-        const stageWanted = getConnections("STAGE") > 0 && getStageStreamSubscriberIds().length > 0
-        if (!stageWanted && !this.requestList.length) return
-
-        ruleViolation("main-frame", "toBitmap")
-        const buffer = image.toBitmap()
-        const size = image.getSize()
-
-        // push compressed frames directly to connected web StageShow clients ("current output" mirrors)
-        this.sendFrameToStageClients(captureId, image, size)
-
-        const hasPreviewRequests = this.requestList.length > 0
-        if (!hasPreviewRequests) return
-
-        /*  convert from ARGB/BGRA (Electron/Chromium capture output) to RGBA (Web canvas)  */
-        this.convertToRGBA(buffer)
-
-        const msg = { channel: "BUFFER", data: { id: captureId, time: Date.now(), buffer, size } }
-        this.sendToRequested(msg)
+        this.sendFrameToStageClients(captureId, image, image.getSize())
     }
 
     // push a downscaled JPEG frame to subscribed web StageShow clients
@@ -510,6 +466,24 @@ export class CaptureTransmitter {
     // The worker produced the RGBA frame OutputShow clients want; main only forwards it.
     static sendServerFrame(outputId: string, buffer: Buffer, size: Size) {
         toServer(OUTPUT_STREAM, { channel: "STREAM", data: { id: outputId, time: Date.now(), buffer, size } })
+    }
+
+    // A remote controller asks for a thumbnail every so often and waits for it. While one is outstanding
+    // the worker encodes the frame it already has, so the main process never takes a capture of its own.
+    private static thumbWanted = new Set<string>()
+
+    static requestControllerThumbnail(outputId: string) {
+        this.thumbWanted.add(outputId)
+    }
+
+    static thumbRequest(captureId: string): { width: number; quality: number } | null {
+        if (!this.thumbWanted.has(captureId)) return null
+        return { width: this.STAGE_FRAME_MAX_WIDTH, quality: 70 }
+    }
+
+    static sendControllerThumbnail(outputId: string, jpeg: Buffer, size: Size) {
+        this.thumbWanted.delete(outputId)
+        toServer(CONTROLLER, { channel: "OUTPUT_FRAME", data: { frame: "data:image/jpeg;base64," + jpeg.toString("base64"), width: size.width, height: size.height } })
     }
 
     // What subscribed stage clients want, so the capture worker can produce and encode it. Returning
@@ -580,12 +554,6 @@ export class CaptureTransmitter {
         const size = image.getSize()
 
         RtmpStreamer.updateFrame(outputId, buffer, size)
-    }
-
-    static requestPreview(data: { id: string; previewId: string }) {
-        this.requestList.push(JSON.stringify(data))
-        // prevent unbounded growth if requested frames never arrive (e.g. capture not running)
-        if (this.requestList.length > this.REQUEST_LIST_MAX) this.requestList = this.requestList.slice(-this.REQUEST_LIST_MAX)
     }
 
     static removeAllChannels(captureId: string) {

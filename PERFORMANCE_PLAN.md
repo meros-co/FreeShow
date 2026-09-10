@@ -219,6 +219,11 @@ target.
 group changes, not per frame. Retire the per-frame `setImmediate`, the admission timer churn, and the
 always-on send timer that fires with no new frame.
 
+**2.9 OutputShow's wire format.** The browser view is sent raw RGBA over socket.io: 1280x720x4 =
+3.5MB a frame, ~77 MB/s, and the socket's ack gate holds it to 22fps against a 30fps target. StageShow
+already sends JPEG. Encoding this too should reach full rate at a fraction of the bandwidth, but it
+changes `src/server/output_stream` as well as the sender, so it is its own piece of work.
+
 ### Phase 3 — Transport
 
 **3.1 One copy per frame per destination.** Give `convert.cc` an into-buffer form so it stops

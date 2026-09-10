@@ -203,8 +203,15 @@ function initialize(id: ServerName, socket: Socket) {
         if (msg.channel === "STREAM_DONE") {
             responded[msg.data.id] = true
         } else if (msg.channel === "OUTPUT_FRAME") {
-            const window = OutputHelper.getOutput(msg.data.outputId)?.window
+            const outputId = msg.data.outputId
+            const window = OutputHelper.getOutput(outputId)?.window
             if (!window || window.isDestroyed()) return
+
+            // The capture worker already has this output's frame and can encode a thumbnail from it. Only
+            // an output nothing is capturing has no frame to take, and that is the one case left where the
+            // main process captures the window itself.
+            CaptureHelper.Transmitter.requestControllerThumbnail(outputId)
+            if (OutputHelper.Lifecycle.isOffMainActive(outputId)) return
 
             const frame = await CaptureHelper.captureBase64Frame(window)
             if (window.isDestroyed()) return

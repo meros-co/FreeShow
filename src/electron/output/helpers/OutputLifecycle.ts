@@ -930,9 +930,17 @@ export class OutputLifecycle {
                 if (!targets.some((t) => t.width === vw && t.height === vh && t.format === 3)) targets.push({ width: vw, height: vh, format: 3 })
                 serverStream = { width: vw, height: vh, intervalMs: serverReq.intervalMs }
             }
+            const thumbReq = CaptureHelper.Transmitter.thumbRequest(id)
+            let thumbStream: { width: number; height: number; quality: number } | null = null
+            if (thumbReq && width && height) {
+                const tw = Math.min(thumbReq.width, width)
+                const th = Math.max(1, Math.round((height * tw) / width))
+                if (!targets.some((t) => t.width === tw && t.height === th && t.format === 3)) targets.push({ width: tw, height: th, format: 3 })
+                thumbStream = { width: tw, height: th, quality: thumbReq.quality }
+            }
             const cpuTargets = targets.length > 0 && !addon.targetsSupported
             const seq = ++offMainSeq
-            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, convertCheck, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, stageStream, serverStream, rtmpMembers, bmdMembers, webrtcMembers, presentMembers })) {
+            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, convertCheck, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, stageStream, serverStream, thumbStream, rtmpMembers, bmdMembers, webrtcMembers, presentMembers })) {
                 forwardAt.set(seq, { t: Date.now(), unc: OutputLifecycle.globalInFlight === 0, px: width * height })
                 OutputLifecycle.globalInFlight++
                 offMainInFlight++
@@ -1196,8 +1204,11 @@ export class OutputLifecycle {
     private static startOsrSendTimer(window: BrowserWindow, id: string, emit: () => void) {
         let sendTimer: NodeJS.Timeout
         const tick = () => {
+            // While the worker owns delivery there is nothing for this timer to send: main holds no frame,
+            // and every consumer already has one. Emitting anyway walked the channel list once per tick per
+            // output for nothing. It resumes on its own if the output ever falls back to the main path.
             // transmitFrame no-ops until the output's capture channels are set up, and throttles each consumer
-            if (!window.isDestroyed()) emit()
+            if (!window.isDestroyed() && !OutputLifecycle.isOffMainActive(id)) emit()
             // re-read the interval each tick so framerate changes (e.g. NDI connect) take effect
             const interval = this.getOsrSendInterval(id)
             sendTimer = setTimeout(tick, interval)

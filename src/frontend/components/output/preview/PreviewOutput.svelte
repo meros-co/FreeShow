@@ -1,8 +1,8 @@
 <script lang="ts">
     import { onDestroy } from "svelte"
     import { OUTPUT } from "../../../../types/Channels"
-    import { livePrepare, outputs, styles } from "../../../stores"
-    import { onPreviewFrame } from "../../../utils/previewPort"
+    import { capturedOutputs, livePrepare, outputs, styles } from "../../../stores"
+    import { onStreamFrame } from "../../../utils/streamPort"
     import { send } from "../../../utils/request"
     import { StreamCanvasRenderer } from "../../drawer/live/streamCanvas"
     import Icon from "../../helpers/Icon.svelte"
@@ -24,10 +24,11 @@
 
     $: stageOutput = $outputs[outputId]?.stageOutput
 
-    // A captured output (NDI/OMT/streaming/Blackmagic) renders offscreen and is read back for its
-    // senders; its preview is that readback, downscaled, so the preview never decodes the media again.
+    // A captured output renders offscreen and is read back; its preview is that readback, downscaled, so
+    // the preview never decodes the media again. Which outputs those are is whatever a capture is actually
+    // running for - a displayed output being watched in a browser is captured just as an NDI one is.
     $: output = $outputs[outputId]
-    $: captured = !!output && !!(output.ndi || output.omt || output.webrtc || output.rtmp || output.blackmagic)
+    $: captured = !!output && !!$capturedOutputs[outputId]
 
     let previewCanvas: HTMLCanvasElement | null = null
     const renderer = new StreamCanvasRenderer()
@@ -62,9 +63,10 @@
         resetLive()
         if (!id) return
         send(OUTPUT, ["PREVIEW_SUBSCRIBE"], { id, subscriber, width: drawnWidth })
-        unlisten = onPreviewFrame(id, (frame) => {
+        unlisten = onStreamFrame("PREVIEW", (data) => {
+            if (data.id !== id) return
             noteFrame()
-            if (previewCanvas) renderer.draw(previewCanvas, { xres: frame.width, yres: frame.height, data: frame.data, format: "bgra" })
+            if (previewCanvas) renderer.draw(previewCanvas, data.frame)
         })
     }
     onDestroy(() => {

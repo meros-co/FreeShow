@@ -60,13 +60,6 @@ contextBridge.exposeInMainWorld("api", {
     }
 })
 
-// One port per window, handed over the first time the receiving process has a frame for it. It is
-// forwarded straight into the page instead of being read here: dispatching from the preload copies
-// every frame across the contextBridge again, which at 4K made frames arrive too old to be drawn.
-ipcRenderer.on("PREVIEW_PORT", (event) => {
-    window.postMessage({ type: "PREVIEW_PORT" }, "*", [event.ports[0]])
-})
-
 // frames from the stream receive process (shared memory + loopback socket): see streamLink.ts
 installStreamLinks(ipcRenderer)
 
