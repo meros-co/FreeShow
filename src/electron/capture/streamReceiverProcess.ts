@@ -438,11 +438,14 @@ class Omt {
     }
 
     private static readonly RECEIVE_TIMEOUT_MS = 50
-    private static readonly FULL_LOOP_DELAY_MS = 16 // ~60fps ceiling
+    // How long to wait before asking again when a receive came back EMPTY. It is not a frame-rate ceiling
+    // (it was named as one): receive() blocks until the source's next frame, so a source that is delivering
+    // paces the loop itself and this is never waited.
+    private static readonly IDLE_POLL_MS = 16
     // Drawer and editor tiles are snapshots, not live streams: take one frame, drop the connection, and
     // come back later. Holding a receiver open made the sender count the tile as a viewer, which on
     // FreeShow's own output lifted its idle gate and drove the encoder at full rate for a thumbnail.
-    private static readonly THUMBNAIL_REFRESH_MS = 30000
+    // The interval itself is Ndi.THUMBNAIL_REFRESH_MS, so the two protocols cannot drift apart.
     private static readonly SNAPSHOT_RECEIVE_TIMEOUT_MS = 1000 // a fresh receiver needs longer for its first frame
     private static readonly SNAPSHOT_RETRY_MS = 1000 // nothing arrived: come back sooner than a full refresh
 
@@ -482,7 +485,7 @@ class Omt {
             if (!existing.stopped) return
             await this.stopLoop(existing)
         }
-        this.startLoop(source, true, this.THUMBNAIL_REFRESH_MS)
+        this.startLoop(source, true, Ndi.THUMBNAIL_REFRESH_MS)
     }
 
     // refresh now rather than waiting out the snapshot interval (the tile's refresh button)
@@ -505,7 +508,7 @@ class Omt {
             await this.stopLoop(existing)
         }
 
-        this.startLoop(source, false, this.FULL_LOOP_DELAY_MS)
+        this.startLoop(source, false, this.IDLE_POLL_MS)
     }
 
     private static startLoop(source: any, lowbandwidth: boolean, delayMs: number) {

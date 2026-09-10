@@ -22,7 +22,6 @@ export type Channel = {
 export class CaptureTransmitter {
     private static readonly IS_BIG_ENDIAN = os.endianness() === "BE"
     // StageShow "Output window" items: push JPEG frames directly to connected clients
-    private static readonly STAGE_PUSH_MIN_INTERVAL_MS = 100 // max 10fps
     private static readonly STAGE_FRAME_MAX_WIDTH = 1280
 
     private static readonly SERVER_RESIZE_THRESHOLDS = [
@@ -509,9 +508,15 @@ export class CaptureTransmitter {
 
     // What subscribed stage clients want, so the capture worker can produce and encode it. Returning
     // null means nobody is watching and no frame should be made for them at all.
+    // How often a stage client is sent a frame is its configured rate and nothing else. There used to be a
+    // second number here (a 100ms floor, so 10fps) that disagreed with the configured 20, and the floor won.
+    private static stagePushIntervalMs() {
+        return 1000 / Math.max(1, CaptureHelper.defaultFramerates().stage)
+    }
+
     static stageStreamRequest(): { width: number; quality: number; intervalMs: number } | null {
         if (getConnections("STAGE") === 0 || getStageStreamSubscriberIds().length === 0) return null
-        return { width: this.STAGE_FRAME_MAX_WIDTH, quality: 70, intervalMs: this.STAGE_PUSH_MIN_INTERVAL_MS }
+        return { width: this.STAGE_FRAME_MAX_WIDTH, quality: 70, intervalMs: this.stagePushIntervalMs() }
     }
 
     // The worker encoded a frame for the stage clients; main only forwards the bytes.
@@ -524,7 +529,7 @@ export class CaptureTransmitter {
         if (getConnections("STAGE") === 0 || getStageStreamSubscriberIds().length === 0) return
 
         const now = performance.now()
-        if (now - (this.lastStagePushTimes[captureId] || 0) < this.STAGE_PUSH_MIN_INTERVAL_MS) return
+        if (now - (this.lastStagePushTimes[captureId] || 0) < this.stagePushIntervalMs()) return
         this.lastStagePushTimes[captureId] = now
 
         let frameImage = image

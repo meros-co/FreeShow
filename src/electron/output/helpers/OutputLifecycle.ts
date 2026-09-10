@@ -403,7 +403,10 @@ export class OutputLifecycle {
     // must not also be served from main, or a moment where the off-main path declines one frame leaves the
     // main-side timer re-sending a stale one beside the worker's fresh ones.
     private static offMainAt = new Map<string, number>()
-    private static readonly OFF_MAIN_ACTIVE_MS = 1000
+    // How long after a forwarded frame the worker still counts as owning this output. A fixed second meant
+    // something different at 60fps and at 5; it is a few of THIS output's frame intervals, so a rate change
+    // does not change what "recently" means.
+    private static readonly OFF_MAIN_ACTIVE_FRAMES = 4
 
     static noteOffMain(id: string) {
         this.offMainAt.set(id, Date.now())
@@ -411,10 +414,27 @@ export class OutputLifecycle {
 
     static isOffMainActive(id: string): boolean {
         const at = this.offMainAt.get(id)
-        return !!at && Date.now() - at < this.OFF_MAIN_ACTIVE_MS
+        if (!at) return false
+        return Date.now() - at < this.getOsrTargetInterval(id) * this.OFF_MAIN_ACTIVE_FRAMES
     }
 
-    static readonly OSR_RENDER_FPS = 60
+    // The ceiling on how fast any output renders. It was a flat 60 whatever the hardware: a 30Hz display
+    // rendered twice what it could show, and a 120Hz one could never be fed. It is the fastest thing that
+    // could actually consume a frame - the quickest display attached, or the quickest rate any consumer is
+    // configured for, whichever is higher - so nothing is rendered that nothing could take.
+    private static renderCeiling = 0
+    static get OSR_RENDER_FPS(): number {
+        if (this.renderCeiling) return this.renderCeiling
+        let best = 0
+        try {
+            for (const d of screen.getAllDisplays()) best = Math.max(best, d.displayFrequency || 0)
+        } catch {
+            // no display information (headless): the consumer rates below decide on their own
+        }
+        for (const rate of Object.values(CaptureHelper.defaultFramerates())) best = Math.max(best, rate || 0)
+        this.renderCeiling = Math.max(1, Math.round(best))
+        return this.renderCeiling
+    }
 
     private static attachOsrCapture(window: BrowserWindow, id: string) {
         try {

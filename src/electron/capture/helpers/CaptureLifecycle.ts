@@ -8,7 +8,11 @@ import { CaptureHelper } from "../CaptureHelper"
 import { CaptureTransmitter } from "./CaptureTransmitter"
 
 export class CaptureLifecycle {
-    private static readonly FALLBACK_FPS = 60
+    // how soon to look again when a device refused a frame: no point waiting longer than the fastest
+    // rate anything on this machine could want one
+    private static get FALLBACK_FPS() {
+        return OutputHelper.Lifecycle.OSR_RENDER_FPS
+    }
     private static readonly MIN_DELAY_MS = 1
     private static readonly WEBRTC_START_DELAY_MS = 1000
     // reduce capture rate when output content has not changed for a while (static slide/idle)
