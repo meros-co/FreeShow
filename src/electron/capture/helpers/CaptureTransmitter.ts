@@ -136,19 +136,10 @@ export class CaptureTransmitter {
     }
 
     // Dispatches downscaled frame from worker to server/stage channels
+    // Only the app window's previews are served from here now. OutputShow and StageShow viewers get their
+    // own frame produced by the GPU and delivered by the worker, so main no longer wraps this buffer in an
+    // image, resizes it, swaps its channels or encodes it.
     static receiveScaledFrame(memberIds: string[], buffer: ArrayBuffer, byteOffset: number, byteLength: number, size: Size) {
-        if (this.previewViewersConnected()) {
-            // createFromBitmap copies, so the buffer is free again once the image exists
-            const image = nativeImage.createFromBitmap(Buffer.from(buffer, byteOffset, byteLength), size)
-            if (!image.isEmpty()) {
-                for (const id of memberIds) {
-                    for (const key of ["server", "stage"]) {
-                        if (this.channels[`${id}-${key}`]) this.sendFrameToChannel(id, key, image)
-                    }
-                }
-            }
-        }
-        // last use of the buffer, so the window is handed it rather than given a clone of it
         PreviewStream.push(memberIds, buffer, byteOffset, byteLength, size)
     }
 
@@ -503,6 +494,18 @@ export class CaptureTransmitter {
 
     // push a downscaled JPEG frame to subscribed web StageShow clients
     // clients without a visible "current output" mirror never subscribe, so text-only stage displays receive nothing
+    // What connected OutputShow clients want. They take raw RGBA, so the GPU can produce exactly that
+    // and main forwards the bytes without reading back or converting anything.
+    static serverStreamRequest(): { width: number } | null {
+        if (getConnections("OUTPUT_STREAM") === 0) return null
+        return { width: this.HEAVY_IMAGE_MAX_WIDTH }
+    }
+
+    // The worker produced the RGBA frame OutputShow clients want; main only forwards it.
+    static sendServerFrame(outputId: string, buffer: Buffer, size: Size) {
+        toServer(OUTPUT_STREAM, { channel: "STREAM", data: { id: outputId, time: Date.now(), buffer, size } })
+    }
+
     // What subscribed stage clients want, so the capture worker can produce and encode it. Returning
     // null means nobody is watching and no frame should be made for them at all.
     static stageStreamRequest(): { width: number; quality: number; intervalMs: number } | null {

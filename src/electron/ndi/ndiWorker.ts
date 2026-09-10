@@ -694,7 +694,7 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
     }
 }
 
-async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } }; bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } }; webrtcMembers?: { [id: string]: { width: number; height: number } }; convertCheck?: boolean; stageStream?: { width: number; height: number; quality: number; intervalMs: number } | null }) {
+async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } }; bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } }; webrtcMembers?: { [id: string]: { width: number; height: number } }; convertCheck?: boolean; stageStream?: { width: number; height: number; quality: number; intervalMs: number } | null; serverStream?: { width: number; height: number } | null }) {
     // seq identifies this in-flight capture; the osr-capture key is slotted so concurrent readbacks
     // for one output use independent pool entries
     const seq = opts.seq ?? 0
@@ -997,6 +997,16 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
                     const verdict = worst === 0 ? "identical to the CPU reference" : `worst ${worst} at byte ${at}, ${differing} of ${bytes} bytes differ`
                     console.info(`[CONVERT-CHECK ${id}] ${size.width}x${size.height} format ${f} on ${backend}: ${verdict}`)
                 }
+            }
+        }
+
+        if (opts.serverStream) {
+            const cfg = opts.serverStream
+            const ti = targetBufs.findIndex((t) => t.width === cfg.width && t.height === cfg.height && t.format === 3)
+            if (ti >= 0) {
+                const bytes = cfg.width * cfg.height * 4
+                const copy = Buffer.from(targetBufs[ti].pbuf.buf.subarray(0, bytes))
+                port.postMessage({ type: "serverFrame", id, buffer: copy, size: { width: cfg.width, height: cfg.height } }, [copy.buffer])
             }
         }
 
