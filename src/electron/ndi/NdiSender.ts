@@ -18,6 +18,7 @@ export type CaptureFrameOpts = {
     memberFramerates?: { [id: string]: number }
     format: number // readback format of the main buffer (0 BGRA, 1 UYVY, 2 UYVA)
     convertCheck?: boolean // FS_CONVERT_CHECK: take the frame as BGRA too so the worker can check the GPU convert
+    stageStream?: { width: number; height: number; quality: number; intervalMs: number } | null // subscribed stage clients
     mainFormat?: number // the format full-size members send in (differs from `format` only on the CPU-target path)
     transparent?: boolean
     dstW?: number
@@ -153,6 +154,9 @@ export class NdiSender {
             // off-main capture fully done -> a pipeline slot frees (the lifecycle may forward the next frame).
             // msg.tl = FS_CAP_STATS per-frame worker timeline (hop timestamps) for the [TIMELINE] attribution.
             this.captureDoneCallbacks[msg.id]?.(msg.seq, msg.tl)
+        } else if (msg.type === "stageJpeg") {
+            // already encoded in the worker; main only forwards the bytes
+            CaptureHelper.Transmitter.sendStageJpeg(msg.id, msg.jpeg, msg.size)
         } else if (msg.type === "scaledFrame") {
             // the worker GPU-downscaled the 4K readback to a small BGRA (server/stage) and copied it here;
             // main wraps the small image once and fans it out to every group member's server/stage consumers

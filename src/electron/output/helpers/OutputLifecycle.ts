@@ -818,9 +818,20 @@ export class OutputLifecycle {
                     if (!targets.some((t) => t.width === width && t.height === height && t.format === f)) targets.push({ width, height, format: f })
                 }
             }
+            // Subscribed stage clients get their frame from the GPU at exactly the size they need and in
+            // the channel order the encoder wants, so the worker encodes it without touching a pixel and
+            // main never resizes or encodes anything.
+            const stageReq = CaptureHelper.Transmitter.stageStreamRequest()
+            let stageStream: { width: number; height: number; quality: number; intervalMs: number } | null = null
+            if (stageReq && width && height) {
+                const sw = Math.min(stageReq.width, width)
+                const sh = Math.max(1, Math.round((height * sw) / width))
+                if (!targets.some((t) => t.width === sw && t.height === sh && t.format === 3)) targets.push({ width: sw, height: sh, format: 3 })
+                stageStream = { width: sw, height: sh, quality: stageReq.quality, intervalMs: stageReq.intervalMs }
+            }
             const cpuTargets = targets.length > 0 && !addon.targetsSupported
             const seq = ++offMainSeq
-            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, convertCheck, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, rtmpMembers, bmdMembers, webrtcMembers })) {
+            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, convertCheck, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, stageStream, rtmpMembers, bmdMembers, webrtcMembers })) {
                 forwardAt.set(seq, { t: Date.now(), unc: OutputLifecycle.globalInFlight === 0, px: width * height })
                 OutputLifecycle.globalInFlight++
                 offMainInFlight++

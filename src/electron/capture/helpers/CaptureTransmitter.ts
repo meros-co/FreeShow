@@ -503,6 +503,19 @@ export class CaptureTransmitter {
 
     // push a downscaled JPEG frame to subscribed web StageShow clients
     // clients without a visible "current output" mirror never subscribe, so text-only stage displays receive nothing
+    // What subscribed stage clients want, so the capture worker can produce and encode it. Returning
+    // null means nobody is watching and no frame should be made for them at all.
+    static stageStreamRequest(): { width: number; quality: number; intervalMs: number } | null {
+        if (getConnections("STAGE") === 0 || getStageStreamSubscriberIds().length === 0) return null
+        return { width: this.STAGE_FRAME_MAX_WIDTH, quality: 70, intervalMs: this.STAGE_PUSH_MIN_INTERVAL_MS }
+    }
+
+    // The worker encoded a frame for the stage clients; main only forwards the bytes.
+    static sendStageJpeg(captureId: string, jpeg: Buffer, size: Size) {
+        toStageStreamSubscribers({ channel: "STREAM_FRAME", data: { id: captureId, jpeg, size, time: Date.now() } })
+    }
+
+    // Legacy path only: an output captured with capturePage has no worker to encode for it.
     private static sendFrameToStageClients(captureId: string, image: NativeImage, size: Size) {
         if (getConnections("STAGE") === 0 || getStageStreamSubscriberIds().length === 0) return
 

@@ -694,7 +694,7 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
     }
 }
 
-async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } }; bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } }; webrtcMembers?: { [id: string]: { width: number; height: number } }; convertCheck?: boolean }) {
+async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } }; bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } }; webrtcMembers?: { [id: string]: { width: number; height: number } }; convertCheck?: boolean; stageStream?: { width: number; height: number; quality: number; intervalMs: number } | null }) {
     // seq identifies this in-flight capture; the osr-capture key is slotted so concurrent readbacks
     // for one output use independent pool entries
     const seq = opts.seq ?? 0
@@ -1000,6 +1000,12 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             }
         }
 
+        if (opts.stageStream) {
+            const cfg = opts.stageStream
+            const ti = targetBufs.findIndex((t) => t.width === cfg.width && t.height === cfg.height && t.format === 3)
+            if (ti >= 0) encodeStageFrame(id, members, targetBufs[ti].pbuf.buf.subarray(0, cfg.width * cfg.height * 4), cfg)
+        }
+
         loopDiag.fanMs += performance.now() - tFan
         if (tl) tl.enq = Date.now() // pacer enqueue complete (memcpy + fan-out done) — nonzero = clean path
     } catch (err) {
@@ -1127,6 +1133,44 @@ setInterval(() => {
 type VideoBuf = { buf: Buffer; bytes: number; inUse: boolean }
 type VideoLayerState = { bufs: VideoBuf[]; current: VideoBuf | null; width: number; height: number; format: number; ws: any; ring: { name: string; slotBytes: number } | null }
 const videoLayers: { [outputId: string]: VideoLayerState } = {}
+
+// Stage clients watching in a browser take a JPEG. The encode happens here because a worker thread
+// cannot load Electron, so its image API is unreachable, and doing it on the main thread cost the UI's
+// event loop a resize and a full encode on every pushed frame. The GPU already produced the frame at
+// exactly the right size in RGBA, so nothing here touches a pixel before handing it to the encoder.
+let sharpModule: any = null
+function loadSharp() {
+    if (sharpModule === null) {
+        try {
+            sharpModule = require("sharp")
+        } catch (err: any) {
+            sharpModule = false
+            console.error("stage JPEG encoder unavailable:", err.message)
+        }
+    }
+    return sharpModule || null
+}
+const stageBusy = new Set<string>()
+const stageLastAt: { [id: string]: number } = {}
+
+function encodeStageFrame(id: string, members: string[], rgba: Buffer, cfg: { width: number; height: number; quality: number; intervalMs: number }) {
+    const sharp = loadSharp()
+    if (!sharp || stageBusy.has(id)) return
+    const now = Date.now()
+    if (now - (stageLastAt[id] || 0) < cfg.intervalMs) return
+    stageLastAt[id] = now
+    stageBusy.add(id)
+    // the frame buffer is recycled as soon as this returns, and the encode is asynchronous
+    const owned = Buffer.from(rgba)
+    sharp(owned, { raw: { width: cfg.width, height: cfg.height, channels: 4 } })
+        .jpeg({ quality: cfg.quality })
+        .toBuffer()
+        .then((jpeg: Buffer) => {
+            port.postMessage({ type: "stageJpeg", id, members, jpeg, size: { width: cfg.width, height: cfg.height } })
+        })
+        .catch((err: any) => console.error("stage JPEG encode failed:", err.message))
+        .finally(() => stageBusy.delete(id))
+}
 // FS_CONVERT_CHECK reports once per output; comparing every frame would swamp the log
 const convertChecked = new Set<string>()
 // outputs whose page has been told the composite is running (so it can stop drawing the frame itself)
