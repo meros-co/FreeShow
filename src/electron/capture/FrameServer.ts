@@ -77,6 +77,7 @@ export class FrameServer {
     private server: http.Server
     private wss: any
     private stats: { [targetId: string]: { offered: number; posted: number; acked: number; replaced: number } } = {}
+    private stallTimer: NodeJS.Timeout | null = null
     private statsTimer: NodeJS.Timeout | null = null
     /** time spent in shared-memory copies (thread pool), ms, for the owner's telemetry */
     shmMs = 0
@@ -96,6 +97,7 @@ export class FrameServer {
         })
         this.wss.on("connection", (ws: any) => this.onConnection(ws))
         if (opts.stats) this.statsTimer = setInterval(() => this.logStats(), 1000)
+        this.stallTimer = setInterval(() => this.sweepStalled(), 1000)
     }
 
     get info() {
@@ -170,6 +172,7 @@ export class FrameServer {
     close() {
         for (const id of Object.keys(this.subscribers)) this.drop(id)
         if (this.statsTimer) clearInterval(this.statsTimer)
+        if (this.stallTimer) clearInterval(this.stallTimer)
         try {
             this.wss.close()
             this.server.close()
@@ -222,6 +225,34 @@ export class FrameServer {
         if (!subscriber.roundTrip || !subscriber.frameInterval) return 1
         const depth = Math.ceil(subscriber.roundTrip / subscriber.frameInterval) + 1
         return subscriber.ring ? Math.min(depth, subscriber.ring.slots) : depth
+    }
+
+    // A window that stops acking - a hung renderer, a page torn down without closing its socket - leaves
+    // its slots busy and its in-flight count high, and this target would never send again. Silence longer
+    // than a whole sample window of round trips is not a slow window; reclaim what it was given and let it
+    // start again. The bound comes from what has been measured for this subscriber, so a genuinely slow
+    // window is never cut off: it is always acking something.
+    private sweepStalled() {
+        const now = Date.now()
+        for (const targetId of Object.keys(this.subscribers)) {
+            const subscriber = this.subscribers[targetId]
+            const oldest = subscriber.sentAt[0]
+            if (!subscriber.inFlight || oldest === undefined) continue
+
+            const worst = subscriber.roundTrips.length ? Math.max(...subscriber.roundTrips) : 0
+            const slots = subscriber.ring?.slots || 1
+            const limit = Math.max(worst, subscriber.frameInterval * slots) * ROUND_TRIP_SAMPLES
+            if (!limit || now - oldest < limit) continue
+
+            this.opts.log(`[${targetId}] window stopped acking ${Math.round(now - oldest)}ms ago; reclaiming ${subscriber.inFlight} frame(s)`)
+            if (subscriber.ring) subscriber.ring.busy.fill(false)
+            subscriber.inFlight = 0
+            subscriber.sentAt = []
+            if (subscriber.pending) {
+                this.release(subscriber.pending.frame)
+                subscriber.pending = null
+            }
+        }
     }
 
     private canPost(subscriber: Subscriber) {
