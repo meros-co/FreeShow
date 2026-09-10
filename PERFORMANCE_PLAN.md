@@ -285,10 +285,60 @@ nowhere and left to auto-detection, though the preload and the capture worker bo
 (a native module the capture worker started using for stage and thumbnail encodes). `libspotifyctl`
 stays Windows-only, being an optional dependency. Not verified by a packaged build.
 
-**5.4 Retire the Linux-only workarounds** where Phase 1 and Phase 3 make them unnecessary, and derive
-the rest. Also reconcile the documentation, which claims a compositor switch that is not in the code.
+**5.4 Audited; the documentation is reconciled, and NO workaround was retired.** Each Linux-only path was
+checked against what Phases 1 and 3 actually changed, and none of them is made unnecessary by that work:
+
+| Linux-only path | Why it exists | Still needed |
+|---|---|---|
+| `applyLinuxSwitches()` unthrottle switches | Chromium OSR starves paints without a begin-frame source | yes - nothing in Phase 1 or 3 touches paint delivery |
+| `updateOsrPaintDrive` (invalidate timer) | same starvation, driven explicitly | yes, same reason |
+| `avoidLinuxDisplaySizeShrink` | X11 subtracts 1px from a window matching a monitor exactly, giving an odd width the encoder refuses | yes - a window-manager behaviour, unrelated |
+| `kImportFailDemotion` (CPU after 3 dmabuf import failures) | a real fallback, not a workaround | yes |
+| dmabuf planes vs a shared-texture handle | the platform's texture representation, not a workaround | keep |
+
+Phase 1 did retire one: the two-phase `readbackConsume`/`readbackFinish` install used to be conditional,
+and a backend without it demoted the whole render group to a main-process readback. It is unconditional
+everywhere now.
+
+The documentation claim is corrected. `READBACK_REWORK_PLAN.md` said the compositor switches live in
+`src/electron/index.ts` (they are in `src/electron/utils/commandLineSwitches.ts`) and listed
+`run-all-compositor-stages-before-draw` among them, which is applied nowhere in the code.
+
+One thing worth TESTING for removal rather than assuming: `disable-gpu-vsync` and
+`disable-frame-rate-limit` are global, so they also unthrottle the main window and any displayed output
+window. Phase 3.7 now sets the offscreen render rate explicitly, so the reason for disabling the limit
+globally is weaker than when it was added. Listed below rather than changed blind.
 
 ---
+
+## Part 2b — What still needs real hardware
+
+Everything below is written and builds, but could not be exercised on this machine. Grouped so one pass
+covers it.
+
+**macOS**
+- Build, then `npm run check-capabilities` - it must report every capability present (Windows and Linux
+  both pass 19/19).
+- Open OutputShow and look at the picture. The shared scale source (3.3) is written for Metal but has
+  never been compiled, let alone run. `FS_SHARED_SCALE=0` disables it, so if the picture is wrong, that
+  says whether the shared source is the cause.
+- An output preview, a stage display and an NDI/OMT output: all four consumers now come from the worker.
+
+**Linux**
+- `scripts/wsl-linux-check.sh` already covers compiling, loading, shader compilation and the capability
+  contract. What it cannot cover is the app's GPU path, since WSL reports software-only compositing.
+- On real hardware: the same OutputShow / preview / stage / sender check as macOS.
+- The GL thread's wedge timeout (3.6) has never been triggered - it needs a driver that actually hangs.
+- Try removing `disable-gpu-vsync` and `disable-frame-rate-limit` (see 5.4) and confirm paints/s holds.
+
+**Blackmagic (any platform)**
+- Playback through a card: the conversion runs in the worker and the main-process path is now reachable
+  only as a fallback, so a card that works proves the worker path.
+- The memory-based backpressure table is gone (Phase 4); the card's own buffer depth is the gate. Worth
+  a long run to confirm nothing grows.
+
+**Every platform**
+- `scripts/benchmark.mjs` with receivers attached, numbers recorded (5.2).
 
 ## Part 3 — Measured on Windows, 2026-09-08
 
