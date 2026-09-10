@@ -712,7 +712,11 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
     const hasBmd = bmdMembers.length > 0
     const webrtcMembers = Object.keys(opts.webrtcMembers || {})
     const hasWebrtc = webrtcMembers.length > 0
-    if ((!hasNdi && !hasOmt && !hasRtmp && !hasBmd && !hasWebrtc) || !osr?.readback) {
+    // An output whose only consumers are the web server, a stage client or a preview still belongs here:
+    // it needs the downscaled frame, and producing that on the main thread was the last routine path that
+    // put a full frame in front of the UI's event loop.
+    const wantsScaledOnly = !hasNdi && !hasOmt && !hasRtmp && !hasBmd && !hasWebrtc && (opts.dstW || 0) > 0 && (opts.dstH || 0) > 0
+    if ((!hasNdi && !hasOmt && !hasRtmp && !hasBmd && !hasWebrtc && !wantsScaledOnly) || !osr?.readback) {
         port.postMessage({ type: "releaseTexture", id, seq })
         port.postMessage({ type: "captureDone", id, seq })
         return
