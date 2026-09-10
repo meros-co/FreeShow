@@ -24,12 +24,6 @@ export class CaptureTransmitter {
     // StageShow "Output window" items: push JPEG frames directly to connected clients
     private static readonly STAGE_FRAME_MAX_WIDTH = 1280
 
-    private static readonly SERVER_RESIZE_THRESHOLDS = [
-        { connections: 20, scale: 0.3 },
-        { connections: 10, scale: 0.5 },
-        { connections: 5, scale: 0.7 }
-    ]
-    private static readonly DEFAULT_SERVER_SCALE = 0.8
     private static readonly FPS_EPSILON_HIGH = 10.0
     private static readonly FPS_EPSILON_LOW = 1.0
 
@@ -364,8 +358,8 @@ export class CaptureTransmitter {
                 break
             case "server": {
                 if (getConnections("OUTPUT_STREAM") === 0) break // nobody watching: no resize, no convert, no send
-                const scale = this.getServerScale()
-                this.sendBufferToServer(captureId, image.resize({ width: size.width * scale, height: size.height * scale, quality: "good" }))
+                const width = Math.min(size.width, this.serverFrameWidth())
+                this.sendBufferToServer(captureId, image.resize({ width, height: Math.max(1, Math.round((size.height * width) / size.width)), quality: "good" }))
                 break
             }
             case "stage":
@@ -380,12 +374,15 @@ export class CaptureTransmitter {
         }
     }
 
-    private static getServerScale(): number {
-        const connections = getConnections("OUTPUT_STREAM")
-        for (const { connections: threshold, scale } of this.SERVER_RESIZE_THRESHOLDS) {
-            if (connections > threshold) return scale
-        }
-        return this.DEFAULT_SERVER_SCALE
+    // The width every OutputShow viewer is served. What each one costs is its area, so the bandwidth the
+    // server hands out is viewers x width^2: holding that roughly constant as viewers arrive means the
+    // width falls with the square root of their number. That was a table of breakpoints (below a third of
+    // the size above twenty viewers, and so on) which only ever applied on the fallback path, while the
+    // worker sent full width to everyone - so the two disagreed about what a viewer costs.
+    static serverFrameWidth(): number {
+        const viewers = Math.max(1, getConnections("OUTPUT_STREAM"))
+        const width = Math.round(this.HEAVY_IMAGE_MAX_WIDTH / Math.sqrt(viewers))
+        return Math.max(2, width - (width % 2)) // even, since the packed formats pair pixels
     }
 
     // NDI
@@ -480,7 +477,7 @@ export class CaptureTransmitter {
     static serverStreamRequest(captureId: string): { width: number; intervalMs: number } | null {
         if (getConnections("OUTPUT_STREAM") === 0) return null
         const fps = OutputHelper.getOutput(captureId)?.captureOptions?.framerates?.server || CaptureHelper.defaultFramerates().server
-        return { width: this.HEAVY_IMAGE_MAX_WIDTH, intervalMs: 1000 / Math.max(1, fps) }
+        return { width: this.serverFrameWidth(), intervalMs: 1000 / Math.max(1, fps) }
     }
 
     // The worker produced the RGBA frame OutputShow clients want; main only forwards it.
