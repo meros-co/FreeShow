@@ -289,8 +289,13 @@ export class OutputLifecycle {
         return RenderGroups.members(id).filter((m) => m === id || (OutputHelper.getOutput(m) as any)?.renderGroupRenderer === id)
     }
 
-    private static isOsrOutput(output: { ndi?: boolean; omt?: boolean; webrtc?: boolean; rtmp?: boolean; blackmagic?: boolean }): boolean {
-        return !!(output.ndi || output.omt || output.webrtc || output.rtmp || output.blackmagic)
+    // Offscreen rendering is what makes a capture leave the main process: it delivers a shared texture the
+    // worker converts on the GPU. A sender implies it, and so does an invisible output, which is
+    // capture-only by definition — those used to be captured with capturePage on the main thread, which
+    // is the one thing no video path may do. An output that can be shown on a monitor still needs a real
+    // window, so it is untouched here.
+    private static isOsrOutput(output: { ndi?: boolean; omt?: boolean; webrtc?: boolean; rtmp?: boolean; blackmagic?: boolean; invisible?: boolean }): boolean {
+        return !!(output.ndi || output.omt || output.webrtc || output.rtmp || output.blackmagic || output.invisible)
     }
 
     static readonly OSR_RENDER_FPS = 60
