@@ -17,6 +17,7 @@ export type CaptureFrameOpts = {
     framerate: number
     memberFramerates?: { [id: string]: number }
     format: number // readback format of the main buffer (0 BGRA, 1 UYVY, 2 UYVA)
+    convertCheck?: boolean // FS_CONVERT_CHECK: take the frame as BGRA too so the worker can check the GPU convert
     mainFormat?: number // the format full-size members send in (differs from `format` only on the CPU-target path)
     transparent?: boolean
     dstW?: number

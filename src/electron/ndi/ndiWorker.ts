@@ -604,44 +604,6 @@ function releasePacerRef(pb: PacerBuf) {
     if (pool && !pool.includes(pb.buf)) pool.push(pb.buf)
 }
 
-// BGRA -> planar I420 (BT.601 limited range), the CPU path for platforms whose GPU readback has no I420 target
-function bgraToI420(bgra: Buffer, w: number, h: number): Buffer {
-    const cw = Math.floor(w / 2)
-    const ch = Math.floor(h / 2)
-    const out = Buffer.allocUnsafe(w * h + 2 * cw * ch)
-    const uOff = w * h
-    const vOff = uOff + cw * ch
-    for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-            const i = (y * w + x) * 4
-            const b = bgra[i]
-            const g = bgra[i + 1]
-            const r = bgra[i + 2]
-            out[y * w + x] = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16
-        }
-    }
-    for (let cy = 0; cy < ch; cy++) {
-        for (let cx = 0; cx < cw; cx++) {
-            let r = 0
-            let g = 0
-            let b = 0
-            for (let dy = 0; dy < 2; dy++) {
-                for (let dx = 0; dx < 2; dx++) {
-                    const i = ((cy * 2 + dy) * w + cx * 2 + dx) * 4
-                    b += bgra[i]
-                    g += bgra[i + 1]
-                    r += bgra[i + 2]
-                }
-            }
-            r >>= 2
-            g >>= 2
-            b >>= 2
-            out[uOff + cy * cw + cx] = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128
-            out[vOff + cy * cw + cx] = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128
-        }
-    }
-    return out
-}
 
 function startPacer(reg: { [id: string]: Sender }, id: string) {
     const s = reg[id]
@@ -732,7 +694,7 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
     }
 }
 
-async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } }; bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } }; webrtcMembers?: { [id: string]: { width: number; height: number } } }) {
+async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } }; bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } }; webrtcMembers?: { [id: string]: { width: number; height: number } }; convertCheck?: boolean }) {
     // seq identifies this in-flight capture; the osr-capture key is slotted so concurrent readbacks
     // for one output use independent pool entries
     const seq = opts.seq ?? 0
@@ -849,7 +811,7 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             ruleViolation("cpu-frame", "worker convert format " + f)
             if (f === 2) return osr.convertBgraToUyva ? osr.convertBgraToUyva(bgra, w, h) : bgraToUyva(bgra, w, h)
             if (f === 1) return osr.convertBgraToUyvy ? osr.convertBgraToUyvy(bgra, w, h) : bgraToUyvy(bgra, w, h)
-            if (f === 4) return bgraToI420(bgra, w, h)
+            if (f === 4) return osr.convertBgraToI420(bgra, w, h)
             return bgra
         }
         const intoPacerBuf = (owner: string, data: Buffer): PacerBuf => {
@@ -995,6 +957,32 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             const marker = BlackmagicSender.audioQueueLength > 0 ? BMD_AUDIO_MARKER : null
             BlackmagicSender.scheduleFrame(m, Buffer.from(b.pbuf.buf.subarray(0, bytes)), marker, want.framerate, b.format === 1)
         }
+        // FS_CONVERT_CHECK: the GPU produced this frame in the real format as a target, and `main` holds
+        // the same frame as BGRA, so converting that here gives the CPU reference to compare it against.
+        if (opts.convertCheck && !convertChecked.has(id)) {
+            const ti = targetBufs.findIndex((t) => t.width === size.width && t.height === size.height && t.format === mainFormat)
+            if (mainFormat === 0) {
+                convertChecked.add(id)
+                console.info(`[CONVERT-CHECK ${id}] nothing to check: this output reads back as BGRA, so no GPU convert runs for it`)
+            } else if (ti >= 0 && main.format === 0) {
+                convertChecked.add(id)
+                const bytes = bytesFor(size.width, size.height, mainFormat)
+                const cpu = convertBgra(main.pbuf.buf.subarray(0, bytesFor(size.width, size.height, 0)), size.width, size.height, mainFormat)
+                const gpu = targetBufs[ti].pbuf.buf
+                let worst = 0
+                let at = -1
+                for (let i = 0; i < bytes; i++) {
+                    const d = Math.abs(cpu[i] - gpu[i])
+                    if (d > worst) {
+                        worst = d
+                        at = i
+                    }
+                }
+                const backend = typeof osr._readbackBackend === "function" ? osr._readbackBackend() : "?"
+                console.info(`[CONVERT-CHECK ${id}] ${size.width}x${size.height} format ${mainFormat} on ${backend}: worst byte difference ${worst}${worst ? " at " + at : ""} over ${bytes} bytes`)
+            }
+        }
+
         loopDiag.fanMs += performance.now() - tFan
         if (tl) tl.enq = Date.now() // pacer enqueue complete (memcpy + fan-out done) — nonzero = clean path
     } catch (err) {
@@ -1122,6 +1110,8 @@ setInterval(() => {
 type VideoBuf = { buf: Buffer; bytes: number; inUse: boolean }
 type VideoLayerState = { bufs: VideoBuf[]; current: VideoBuf | null; width: number; height: number; format: number; ws: any; ring: { name: string; slotBytes: number } | null }
 const videoLayers: { [outputId: string]: VideoLayerState } = {}
+// FS_CONVERT_CHECK reports once per output; comparing every frame would swamp the log
+const convertChecked = new Set<string>()
 // outputs whose page has been told the composite is running (so it can stop drawing the frame itself)
 const videoLayerReported = new Set<string>()
 const VIDEO_BUFS = 3

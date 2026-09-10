@@ -800,9 +800,17 @@ export class OutputLifecycle {
                     if (!targets.some((t) => t.width === sz.width && t.height === sz.height && t.format === 0)) targets.push({ width: sz.width, height: sz.height, format: 0 })
                 }
             }
+            // FS_CONVERT_CHECK: take the frame BOTH ways in one GPU pass — the main readback as plain BGRA
+            // and a full-size target in the real format — so the worker can convert the BGRA itself and
+            // compare. That is the only way to check a GPU kernel against the CPU reference on a real
+            // frame, and it is the check that would have caught the UYVY chroma order being swapped.
+            const convertCheck = !!process.env.FS_CONVERT_CHECK
+            if (convertCheck && !targets.some((t) => t.width === width && t.height === height && t.format === fmt)) {
+                targets.push({ width, height, format: fmt })
+            }
             const cpuTargets = targets.length > 0 && !addon.targetsSupported
             const seq = ++offMainSeq
-            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, rtmpMembers, bmdMembers, webrtcMembers })) {
+            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: convertCheck ? 0 : cpuTargets ? 0 : fmt, mainFormat: fmt, convertCheck, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, rtmpMembers, bmdMembers, webrtcMembers })) {
                 forwardAt.set(seq, { t: Date.now(), unc: OutputLifecycle.globalInFlight === 0, px: width * height })
                 OutputLifecycle.globalInFlight++
                 offMainInFlight++
