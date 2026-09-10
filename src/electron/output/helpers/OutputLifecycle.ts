@@ -418,22 +418,11 @@ export class OutputLifecycle {
         return Date.now() - at < this.getOsrTargetInterval(id) * this.OFF_MAIN_ACTIVE_FRAMES
     }
 
-    // The ceiling on how fast any output renders. It was a flat 60 whatever the hardware: a 30Hz display
-    // rendered twice what it could show, and a 120Hz one could never be fed. It is the fastest thing that
-    // could actually consume a frame - the quickest display attached, or the quickest rate any consumer is
-    // configured for, whichever is higher - so nothing is rendered that nothing could take.
-    private static renderCeiling = 0
+    // The ceiling on how fast any output renders: the highest rate the output frame-rate setting offers.
+    // It exists only so nothing can ask for a rate no setting could have requested - what an output
+    // actually renders at is what it is configured for, which updateRenderRate takes from its members.
     static get OSR_RENDER_FPS(): number {
-        if (this.renderCeiling) return this.renderCeiling
-        let best = 0
-        try {
-            for (const d of screen.getAllDisplays()) best = Math.max(best, d.displayFrequency || 0)
-        } catch {
-            // no display information (headless): the consumer rates below decide on their own
-        }
-        for (const rate of Object.values(CaptureHelper.defaultFramerates())) best = Math.max(best, rate || 0)
-        this.renderCeiling = Math.max(1, Math.round(best))
-        return this.renderCeiling
+        return CaptureHelper.MAX_CONFIGURABLE_FPS
     }
 
     private static attachOsrCapture(window: BrowserWindow, id: string) {
@@ -583,13 +572,12 @@ export class OutputLifecycle {
     private static lastGateLogged = 0
     private static offMain = new Map<string, OffMainState>()
 
-    // An output whose on-screen window draws the capture needs frames at the rate that window refreshes;
-    // the display's own frequency is that rate, so it is read rather than chosen.
+    // An output whose on-screen window draws the capture needs frames at the rate that output is set to
+    // run at. NOT the refresh rate of the monitor it happens to be on: a display output runs at what it
+    // is configured for in FreeShow, whatever the screen could manage.
     static presentFps(id: string): number {
         if (!OutputPresenter.isPresenting(id)) return 0
-        const bounds = OutputHelper.getOutput(id)?.intendedBounds
-        const display = bounds ? screen.getDisplayMatching(bounds) : screen.getPrimaryDisplay()
-        return display?.displayFrequency || this.OSR_RENDER_FPS
+        return CaptureHelper.configuredFramerate(id)
     }
 
     private static rendererTargetFps(id: string): number {

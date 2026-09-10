@@ -1,4 +1,4 @@
-import type { BrowserWindow, Display, NativeImage, Size } from "electron"
+import type { BrowserWindow, NativeImage, Size } from "electron"
 import electron from "electron"
 import { NdiSender } from "../ndi/NdiSender"
 import { OmtSender } from "../omt/OmtSender"
@@ -26,6 +26,19 @@ export class CaptureHelper {
     }
     static customFramerates: { [key: string]: { [key: string]: number } } = {}
 
+    // The highest rate an output can be set to, from the frame-rate setting in Outputs.svelte. It bounds
+    // the render rate only so a nonsense value cannot ask for something no setting could have requested;
+    // what an output actually renders at is what it is configured for (configuredFramerate below).
+    static readonly MAX_CONFIGURABLE_FPS = 60
+
+    // The rate THIS output is configured to run at in FreeShow. Never the monitor's refresh rate: an
+    // output runs at what it is set to whatever the display it lands on could manage.
+    static configuredFramerate(id: string): number {
+        const custom = this.customFramerates[id]
+        const configured = Number(custom?.ndi || custom?.omt || custom?.blackmagic || 0)
+        return configured > 0 ? configured : this.framerates.connected
+    }
+
     // the rate each consumer starts at, so callers never restate one as a literal
     static defaultFramerates(): { [key: string]: number } {
         return {
@@ -40,14 +53,11 @@ export class CaptureHelper {
     }
 
     static getDefaultCapture(window: BrowserWindow, id: string): CaptureOptions {
-        const screen: Display = this.getWindowScreen(window)
-
         const defaultFramerates = this.defaultFramerates()
 
         return {
             window,
             frameSubscription: null,
-            displayFrequency: screen.displayFrequency || 60,
             options: { ndi: false, omt: false, blackmagic: false, server: false, stage: false, webrtc: false, rtmp: false },
             framerates: defaultFramerates,
             id
