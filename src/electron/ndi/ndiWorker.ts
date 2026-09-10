@@ -959,27 +959,40 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
         }
         // FS_CONVERT_CHECK: the GPU produced this frame in the real format as a target, and `main` holds
         // the same frame as BGRA, so converting that here gives the CPU reference to compare it against.
+        // FS_CONVERT_CHECK: every packed format was produced by the GPU as a full-size target, alongside
+        // a plain BGRA one. Converting that BGRA here with the CPU reference gives something to compare
+        // each GPU kernel against on a real frame — the check that would have caught the UYVY chroma
+        // order being swapped.
         if (opts.convertCheck && !convertChecked.has(id)) {
-            const ti = targetBufs.findIndex((t) => t.width === size.width && t.height === size.height && t.format === mainFormat)
-            if (mainFormat === 0) {
+            const si = targetBufs.findIndex((t) => t.width === size.width && t.height === size.height && t.format === 0)
+            if (si >= 0) {
                 convertChecked.add(id)
-                console.info(`[CONVERT-CHECK ${id}] nothing to check: this output reads back as BGRA, so no GPU convert runs for it`)
-            } else if (ti >= 0 && main.format === 0) {
-                convertChecked.add(id)
-                const bytes = bytesFor(size.width, size.height, mainFormat)
-                const cpu = convertBgra(main.pbuf.buf.subarray(0, bytesFor(size.width, size.height, 0)), size.width, size.height, mainFormat)
-                const gpu = targetBufs[ti].pbuf.buf
-                let worst = 0
-                let at = -1
-                for (let i = 0; i < bytes; i++) {
-                    const d = Math.abs(cpu[i] - gpu[i])
-                    if (d > worst) {
-                        worst = d
-                        at = i
-                    }
-                }
                 const backend = typeof osr._readbackBackend === "function" ? osr._readbackBackend() : "?"
-                console.info(`[CONVERT-CHECK ${id}] ${size.width}x${size.height} format ${mainFormat} on ${backend}: worst byte difference ${worst}${worst ? " at " + at : ""} over ${bytes} bytes`)
+                const bgra = targetBufs[si].pbuf.buf.subarray(0, bytesFor(size.width, size.height, 0))
+                for (const f of [1, 2, 4]) {
+                    const ti = targetBufs.findIndex((t) => t.width === size.width && t.height === size.height && t.format === f)
+                    if (ti < 0) {
+                        console.info(`[CONVERT-CHECK ${id}] format ${f}: the GPU produced no target for it`)
+                        continue
+                    }
+                    const bytes = bytesFor(size.width, size.height, f)
+                    const cpu = convertBgra(bgra, size.width, size.height, f)
+                    const gpu = targetBufs[ti].pbuf.buf
+                    let worst = 0
+                    let at = -1
+                    let differing = 0
+                    for (let k = 0; k < bytes; k++) {
+                        const d = Math.abs(cpu[k] - gpu[k])
+                        if (!d) continue
+                        differing++
+                        if (d > worst) {
+                            worst = d
+                            at = k
+                        }
+                    }
+                    const verdict = worst === 0 ? "identical to the CPU reference" : `worst ${worst} at byte ${at}, ${differing} of ${bytes} bytes differ`
+                    console.info(`[CONVERT-CHECK ${id}] ${size.width}x${size.height} format ${f} on ${backend}: ${verdict}`)
+                }
             }
         }
 

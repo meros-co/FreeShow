@@ -805,12 +805,17 @@ export class OutputLifecycle {
             // compare. That is the only way to check a GPU kernel against the CPU reference on a real
             // frame, and it is the check that would have caught the UYVY chroma order being swapped.
             const convertCheck = !!process.env.FS_CONVERT_CHECK
-            if (convertCheck && !targets.some((t) => t.width === width && t.height === height && t.format === fmt)) {
-                targets.push({ width, height, format: fmt })
+            if (convertCheck) {
+                // ask for every packed format the GPU kernels produce, whatever this output actually
+                // needs: the point is to exercise the kernels, and a group with several consumers reads
+                // back as plain BGRA, where there would be nothing to compare
+                for (const f of [0, 1, 2, 4]) {
+                    if (!targets.some((t) => t.width === width && t.height === height && t.format === f)) targets.push({ width, height, format: f })
+                }
             }
             const cpuTargets = targets.length > 0 && !addon.targetsSupported
             const seq = ++offMainSeq
-            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: convertCheck ? 0 : cpuTargets ? 0 : fmt, mainFormat: fmt, convertCheck, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, rtmpMembers, bmdMembers, webrtcMembers })) {
+            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, convertCheck, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, rtmpMembers, bmdMembers, webrtcMembers })) {
                 forwardAt.set(seq, { t: Date.now(), unc: OutputLifecycle.globalInFlight === 0, px: width * height })
                 OutputLifecycle.globalInFlight++
                 offMainInFlight++
