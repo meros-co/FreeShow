@@ -155,6 +155,26 @@ export class CaptureTransmitter {
         return this.osrModule
     }
 
+    // A consumer served from the main process reads the frame back, resizes and encodes it, all on the
+    // thread everything else in the app runs on. What that costs is a property of the machine and the
+    // frame size, so it is measured rather than guessed from a pixel count: the rate is capped so this
+    // work can take no more than HEAVY_MAIN_SHARE of the main thread, whatever it turns out to cost here.
+    // Only the legacy path reaches this - a captured output's consumers are served by the worker.
+    private static readonly HEAVY_MAIN_SHARE = 0.5
+    private static readonly HEAVY_COST_SMOOTHING = 0.2
+    private static heavyCostMs: { [captureId: string]: number } = {}
+
+    private static noteHeavyCost(captureId: string, ms: number) {
+        const previous = this.heavyCostMs[captureId]
+        this.heavyCostMs[captureId] = previous === undefined ? ms : previous + (ms - previous) * this.HEAVY_COST_SMOOTHING
+    }
+
+    private static heavyRateCap(captureId: string): number {
+        const cost = this.heavyCostMs[captureId]
+        if (!cost || cost <= 0) return Infinity // nothing measured yet: let the first frames through and find out
+        return Math.max(1, Math.floor((1000 * this.HEAVY_MAIN_SHARE) / cost))
+    }
+
     private static readonly HEAVY_IMAGE_MAX_WIDTH = 1280
     // Downscale 4K buffer natively if possible before creating NativeImage for server/stage
     private static buildHeavyImage(image: NativeImage | null, raw: { buffer: Buffer; size: Size; format?: number } | undefined): NativeImage | null {
@@ -200,8 +220,7 @@ export class CaptureTransmitter {
     private static transmitFrameBody(captureId: string, image: NativeImage | null, raw: { buffer: Buffer; size: Size; format?: number } | undefined, frameTimestamp: number, captureOptions: any, framerates: any) {
         {
             const baseCaptureFrameRate = CaptureHelper.getMaxActiveFramerate(framerates || {}, captureOptions.options || {})
-            const px = raw?.size ? raw.size.width * raw.size.height : image ? image.getSize().width * image.getSize().height : 0
-            const heavyConsumerCap = px > 4_000_000 ? 12 : px > 2_000_000 ? 20 : Infinity
+            const heavyConsumerCap = this.heavyRateCap(captureId)
 
             const firing: Channel[] = []
             for (const channel of Object.values(this.channels)) {
@@ -226,8 +245,10 @@ export class CaptureTransmitter {
                     this.sendRawToChannel(captureId, channel.key, raw.buffer, raw.size, raw.format ?? 0)
                     continue
                 }
+                const started = performance.now()
                 if (frameImage === undefined) frameImage = this.buildHeavyImage(image, raw)
                 if (frameImage && !frameImage.isEmpty()) this.sendFrameToChannel(captureId, channel.key, frameImage)
+                this.noteHeavyCost(captureId, performance.now() - started)
             }
         }
     }
@@ -561,5 +582,6 @@ export class CaptureTransmitter {
         for (const key of keysToRemove) {
             delete this.channels[key]
         }
+        delete this.heavyCostMs[captureId]
     }
 }

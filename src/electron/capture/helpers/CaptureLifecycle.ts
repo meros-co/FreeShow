@@ -8,16 +8,9 @@ import { CaptureHelper } from "../CaptureHelper"
 import { CaptureTransmitter } from "./CaptureTransmitter"
 
 export class CaptureLifecycle {
-    private static readonly BACKPRESSURE_LOOKUP = [
-        { threshold: 6144, maxFps: 4 },
-        { threshold: 5120, maxFps: 6 },
-        { threshold: 4096, maxFps: 8 },
-        { threshold: 3072, maxFps: 10 }
-    ]
     private static readonly FALLBACK_FPS = 60
     private static readonly MIN_DELAY_MS = 1
     private static readonly WEBRTC_START_DELAY_MS = 1000
-    private static readonly BYTES_PER_MB = 1048576
     // reduce capture rate when output content has not changed for a while (static slide/idle)
     private static readonly IDLE_AFTER_MS = 2000
     private static readonly IDLE_FPS = 3
@@ -183,15 +176,11 @@ export class CaptureLifecycle {
 
         const baseCaptureFrameRate = CaptureHelper.getMaxActiveFramerate(frameRates, options)
 
-        // Blackmagic only - reduce frame rate if memory exceeds thresholds
-        if (captureOpts.options?.blackmagic) {
-            const externalMB = process.memoryUsage().external / this.BYTES_PER_MB
-            for (const { threshold, maxFps } of this.BACKPRESSURE_LOOKUP) {
-                if (externalMB > threshold) {
-                    return Math.min(baseCaptureFrameRate, maxFps)
-                }
-            }
-        }
+        // Blackmagic backpressure used to be a table mapping this PROCESS's external memory in megabytes
+        // to a frame rate - numbers that mean different things on an 8GB machine and a 128GB one, and that
+        // describe the whole process rather than the card that is actually behind. The card's own buffer
+        // depth is the real signal and the worker already gates on it per frame (see BlackmagicSender), with
+        // canAcceptFrame skipping the capture entirely while it cannot take one.
 
         // static content - capture at a low rate until a change is detected
         // (Blackmagic and NDI frames bypass change detection / idle backoff to maintain video stream clocks)

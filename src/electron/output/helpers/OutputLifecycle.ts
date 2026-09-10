@@ -547,7 +547,17 @@ export class OutputLifecycle {
     // Computes per-renderer pipeline depth: ceil(targetFps * minRtt) + 1.
     // Limits how many frames are allowed in-flight to prevent queue bloating while keeping throughput high.
     private static readonly RTT_WINDOW_SAMPLES = 300
-    private static readonly ADDON_MAX_POOL = 16 // Max concurrent readback contexts in native addon
+    // How many readbacks can be in flight at once is the ADDON's limit, so it is read from the addon
+    // rather than restated here. Restating it meant the two could drift: too high and every output stalls
+    // against a limit nothing in this process can see, too low and capacity sits unused.
+    private static addonMaxPool = 0
+    private static get ADDON_MAX_POOL(): number {
+        if (this.addonMaxPool) return this.addonMaxPool
+        const reported = Number(this.getOsrCaptureAddon()?.maxConcurrentReadbacks)
+        // an addon too old to report it still has the pool it always had
+        this.addonMaxPool = reported > 0 ? Math.floor(reported) : 16
+        return this.addonMaxPool
+    }
     private static globalInFlight = 0
     private static lastClampLogged = 0
     private static lastGateLogged = 0

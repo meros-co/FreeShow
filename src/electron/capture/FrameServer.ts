@@ -49,7 +49,10 @@ type Subscriber = {
     ring: ShmRing | null
 }
 
-// slots per window: enough that a frame can be written while the previous ones are still being read
+// Slots a ring starts with: enough that a frame can be written while the previous one is being read. It
+// is a starting point, not a ceiling - a window whose measured round trip needs more gets more (see
+// growRing). It used to be both, so a slow window was silently held to three frames in flight no matter
+// what the measurement asked for.
 const SHM_SLOTS = 3
 // smoothing weight for the interval measurement; a weight, not a machine-dependent threshold
 const SMOOTHING = 0.2
@@ -221,10 +224,32 @@ export class FrameServer {
     // in bursts). The round trip used is the best recent one, not the average: a window that falls
     // behind reports longer and longer round trips, and sizing the depth on those would feed the
     // backlog that caused them.
-    private allowedInFlight(subscriber: Subscriber) {
+    // frames that must overlap to keep this window busy: its round trip divided by the source's frame
+    // interval, plus the one being written
+    private neededDepth(subscriber: Subscriber) {
         if (!subscriber.roundTrip || !subscriber.frameInterval) return 1
-        const depth = Math.ceil(subscriber.roundTrip / subscriber.frameInterval) + 1
+        return Math.ceil(subscriber.roundTrip / subscriber.frameInterval) + 1
+    }
+
+    private allowedInFlight(subscriber: Subscriber) {
+        const depth = this.neededDepth(subscriber)
         return subscriber.ring ? Math.min(depth, subscriber.ring.slots) : depth
+    }
+
+    // A ring holds as many frames as the measurement says this window needs. Growing it reallocates the
+    // shared region, so it happens only when the window is idle - with nothing in flight, no reader can be
+    // looking at a slot - and only upwards, since a window that got faster costs nothing by keeping room.
+    private growRing(targetId: string, subscriber: Subscriber) {
+        const ring = subscriber.ring
+        if (!ring || subscriber.inFlight > 0 || subscriber.pending) return
+        const needed = this.neededDepth(subscriber)
+        if (needed <= ring.slots) return
+
+        const grown = this.createRing(ring.slotBytes, needed)
+        if (!grown) return
+        this.opts.log(`[${targetId}] window needs ${needed} frames in flight; ring grown from ${ring.slots} slots`)
+        this.dropRing(ring)
+        subscriber.ring = grown
     }
 
     // A window that stops acking - a hung renderer, a page torn down without closing its socket - leaves
@@ -264,12 +289,12 @@ export class FrameServer {
         return ring.busy.indexOf(false)
     }
 
-    private createRing(slotBytes: number): ShmRing | null {
+    private createRing(slotBytes: number, slots = SHM_SLOTS): ShmRing | null {
         if (!shmModule) return null
         const name = `fs-${process.pid}-${++shmSeq}`
         try {
-            shmModule.shmMap(name, slotBytes * SHM_SLOTS, true)
-            return { name, slotBytes, slots: SHM_SLOTS, busy: new Array(SHM_SLOTS).fill(false), announced: false }
+            shmModule.shmMap(name, slotBytes * slots, true)
+            return { name, slotBytes, slots, busy: new Array(slots).fill(false), announced: false }
         } catch (err: any) {
             this.opts.log("shared memory unavailable: " + err?.message)
             shmModule = null
@@ -357,7 +382,11 @@ export class FrameServer {
         }
 
         const next = subscriber.pending
-        if (!next || !this.canPost(subscriber)) return
+        if (!next) {
+            this.growRing(targetId, subscriber)
+            return
+        }
+        if (!this.canPost(subscriber)) return
         subscriber.pending = null
         this.post(targetId, subscriber, next)
     }
