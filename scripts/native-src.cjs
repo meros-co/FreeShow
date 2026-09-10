@@ -17,6 +17,15 @@ function checkoutFor(mod) {
     return path.join(repo, "..", MODULES[mod])
 }
 
+// the build file lives beside src, and a new source file is invisible to a rebuild without it, so it is
+// part of what "matches" means
+function hashBuildFile(dir) {
+    const p = path.join(dir, "binding.gyp")
+    if (!fs.existsSync(p)) return ""
+    const text = fs.readFileSync(p, "utf8").replace(/\r\n/g, "\n")
+    return crypto.createHash("sha1").update(text).digest("hex")
+}
+
 function hashDir(dir) {
     if (!fs.existsSync(dir)) return null
     const files = fs
@@ -39,8 +48,8 @@ let mismatched = []
 for (const mod of Object.keys(MODULES)) {
     const installed = path.join(repo, "node_modules", mod, "src")
     const checkout = path.join(checkoutFor(mod), "src")
-    const a = hashDir(installed)
-    const b = hashDir(checkout)
+    const a = hashDir(installed) + hashBuildFile(path.join(installed, ".."))
+    const b = hashDir(checkout) + hashBuildFile(checkoutFor(mod))
     if (a === null || b === null) continue // not installed, or no local checkout to compare against
     if (a === b) continue
     if (!sync) {
@@ -50,6 +59,9 @@ for (const mod of Object.keys(MODULES)) {
     for (const f of fs.readdirSync(checkout).filter((f) => /\.(c|cc|cpp|h|hpp|mm)$/.test(f))) {
         fs.copyFileSync(path.join(checkout, f), path.join(installed, f))
     }
+    // the build file too: a new source file is invisible to the rebuild without it
+    const gyp = path.join(checkoutFor(mod), "binding.gyp")
+    if (fs.existsSync(gyp)) fs.copyFileSync(gyp, path.join(repo, "node_modules", mod, "binding.gyp"))
     console.log(`native-src: synced ${mod} from ${checkout}`)
 }
 
