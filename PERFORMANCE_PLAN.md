@@ -226,7 +226,7 @@ always-on send timer that fires with no new frame.
 already sends JPEG. Encoding this too should reach full rate at a fraction of the bandwidth, but it
 changes `src/server/output_stream` as well as the sender, so it is its own piece of work.
 
-### Phase 3 — Transport
+### Phase 3 — Transport — DONE (3.3 unverified on macOS)
 
 **3.1 One copy per frame per destination.** Give `convert.cc` an into-buffer form so it stops
 allocating twice. Remove the BGRA intermediate in `readback_win.cc`. Make the video-layer
@@ -247,8 +247,10 @@ the source rate on both paths, and the page paint rate is not a limiter.
 **3.6 Bound every queue and time out every wait.** The Linux GL job queue is uncapped, and a target
 whose page stops acking stalls permanently.
 
-**3.7 Stop discarding completed compositor work.** Either the render rate follows the admission rate,
-or admitted-and-parked frames are not thrown away.
+**3.7 DONE — the render rate follows the admission rate.** The note that a sub-native `setFrameRate`
+made Chromium clump paints no longer reproduces; it dated from the main-thread-bound pipeline. A 4K NDI
+output at 30fps now paints 30/s instead of 60/s and discards nothing, delivering the same 30 unique
+frames with the same 33ms mean gap.
 
 ### Phase 4 — Constants and pacing
 
