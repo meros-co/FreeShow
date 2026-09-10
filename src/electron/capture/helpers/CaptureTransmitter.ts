@@ -501,9 +501,10 @@ export class CaptureTransmitter {
     // clients without a visible "current output" mirror never subscribe, so text-only stage displays receive nothing
     // What connected OutputShow clients want. They take raw RGBA, so the GPU can produce exactly that
     // and main forwards the bytes without reading back or converting anything.
-    static serverStreamRequest(): { width: number } | null {
+    static serverStreamRequest(captureId: string): { width: number; intervalMs: number } | null {
         if (getConnections("OUTPUT_STREAM") === 0) return null
-        return { width: this.HEAVY_IMAGE_MAX_WIDTH }
+        const fps = OutputHelper.getOutput(captureId)?.captureOptions?.framerates?.server || CaptureHelper.defaultFramerates().server
+        return { width: this.HEAVY_IMAGE_MAX_WIDTH, intervalMs: 1000 / Math.max(1, fps) }
     }
 
     // The worker produced the RGBA frame OutputShow clients want; main only forwards it.

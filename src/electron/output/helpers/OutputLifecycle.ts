@@ -18,6 +18,7 @@ import { wait } from "../../utils/helpers"
 import { outputOptions } from "../../utils/windowOptions"
 import { OutputHelper } from "../OutputHelper"
 import { setOutputAlwaysOnTop } from "./OutputAlwaysOnTop"
+import { OutputPresenter } from "./OutputPresenter"
 import { OutputVisibility } from "./OutputVisibility"
 import { RenderGroups } from "./RenderGroups"
 
@@ -327,6 +328,8 @@ export class OutputLifecycle {
 
         output.captureWindow = window
         output.osr = true
+        // the surface is now the only render of this content: the on-screen window draws the capture
+        OutputPresenter.start(id, output.window)
         return window
     }
 
@@ -337,6 +340,7 @@ export class OutputLifecycle {
 
         output.captureWindow = undefined
         output.osr = false
+        OutputPresenter.stop(id)
         this.stopOsrPaintDrive(id)
         try {
             this.osrCaptureAddon?.releasePool?.(id)
@@ -506,9 +510,19 @@ export class OutputLifecycle {
     private static lastGateLogged = 0
     private static offMain = new Map<string, OffMainState>()
 
+    // An output whose on-screen window draws the capture needs frames at the rate that window refreshes;
+    // the display's own frequency is that rate, so it is read rather than chosen.
+    static presentFps(id: string): number {
+        if (!OutputPresenter.isPresenting(id)) return 0
+        const bounds = OutputHelper.getOutput(id)?.intendedBounds
+        const display = bounds ? screen.getDisplayMatching(bounds) : screen.getPrimaryDisplay()
+        return display?.displayFrequency || this.OSR_RENDER_FPS
+    }
+
     private static rendererTargetFps(id: string): number {
         let fps = 0
         for (const m of RenderGroups.members(id)) {
+            fps = Math.max(fps, this.presentFps(m))
             const mo = OutputHelper.getOutput(m)
             if (mo?.captureOptions) fps = Math.max(fps, CaptureHelper.getMaxActiveFramerate(mo.captureOptions.framerates || {}, mo.captureOptions.options || {}))
         }
@@ -874,6 +888,14 @@ export class OutputLifecycle {
                     if (!targets.some((t) => t.width === sz.width && t.height === sz.height && t.format === 0)) targets.push({ width: sz.width, height: sz.height, format: 0 })
                 }
             }
+            // members whose on-screen window draws this capture instead of rendering the content again
+            const presentMembers: { [m: string]: { width: number; height: number } } = {}
+            for (const m of members) {
+                if (!OutputPresenter.isPresenting(m)) continue
+                const sz = memberSizes[m] || { width, height }
+                presentMembers[m] = sz
+                if (!targets.some((t) => t.width === sz.width && t.height === sz.height && t.format === 0)) targets.push({ width: sz.width, height: sz.height, format: 0 })
+            }
             // FS_CONVERT_CHECK: take the frame BOTH ways in one GPU pass — the main readback as plain BGRA
             // and a full-size target in the real format — so the worker can convert the BGRA itself and
             // compare. That is the only way to check a GPU kernel against the CPU reference on a real
@@ -900,17 +922,17 @@ export class OutputLifecycle {
             }
             // OutputShow clients take raw RGBA, which the GPU produces directly, so main stops reading the
             // frame back and swapping its channels once per frame per viewer.
-            const serverReq = CaptureHelper.Transmitter.serverStreamRequest()
-            let serverStream: { width: number; height: number } | null = null
+            const serverReq = CaptureHelper.Transmitter.serverStreamRequest(id)
+            let serverStream: { width: number; height: number; intervalMs: number } | null = null
             if (serverReq && width && height) {
                 const vw = Math.min(serverReq.width, width)
                 const vh = Math.max(1, Math.round((height * vw) / width))
                 if (!targets.some((t) => t.width === vw && t.height === vh && t.format === 3)) targets.push({ width: vw, height: vh, format: 3 })
-                serverStream = { width: vw, height: vh }
+                serverStream = { width: vw, height: vh, intervalMs: serverReq.intervalMs }
             }
             const cpuTargets = targets.length > 0 && !addon.targetsSupported
             const seq = ++offMainSeq
-            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, convertCheck, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, stageStream, serverStream, rtmpMembers, bmdMembers, webrtcMembers })) {
+            if (NdiSender.captureFrameNDI(id, source, { size: { width, height }, ratio, framerate, memberFramerates, format: cpuTargets ? 0 : fmt, mainFormat: fmt, convertCheck, transparent, dstW: scaled?.dstW || 0, dstH: scaled?.dstH || 0, seq, members, depth: OutputLifecycle.depthFor(id), omt: hasOmt, omtFramerate, omtMembers, omtFramerates, targets, memberTarget, memberFormats, memberSizes, cpuTargets, stageStream, serverStream, rtmpMembers, bmdMembers, webrtcMembers, presentMembers })) {
                 forwardAt.set(seq, { t: Date.now(), unc: OutputLifecycle.globalInFlight === 0, px: width * height })
                 OutputLifecycle.globalInFlight++
                 offMainInFlight++

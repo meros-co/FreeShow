@@ -694,7 +694,7 @@ async function paceSend(reg: { [id: string]: Sender }, id: string, entry: { fram
     }
 }
 
-async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } }; bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } }; webrtcMembers?: { [id: string]: { width: number; height: number } }; convertCheck?: boolean; stageStream?: { width: number; height: number; quality: number; intervalMs: number } | null; serverStream?: { width: number; height: number } | null }) {
+async function captureAndSend(id: string, source: any, opts: { size: { width: number; height: number }; ratio: number; framerate: number; memberFramerates?: { [id: string]: number }; format: number; mainFormat?: number; transparent?: boolean; dstW?: number; dstH?: number; seq?: number; members?: string[]; depth?: number; omt?: boolean; omtFramerate?: number; omtMembers?: string[]; omtFramerates?: { [id: string]: number }; targets?: { width: number; height: number; format: number }[]; memberTarget?: { [id: string]: number }; memberFormats?: { [id: string]: number }; memberSizes?: { [id: string]: { width: number; height: number } }; cpuTargets?: boolean; rtmpMembers?: { [id: string]: { width: number; height: number } }; bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } }; webrtcMembers?: { [id: string]: { width: number; height: number } }; presentMembers?: { [id: string]: { width: number; height: number } }; convertCheck?: boolean; stageStream?: { width: number; height: number; quality: number; intervalMs: number } | null; serverStream?: { width: number; height: number; intervalMs: number } | null }) {
     // seq identifies this in-flight capture; the osr-capture key is slotted so concurrent readbacks
     // for one output use independent pool entries
     const seq = opts.seq ?? 0
@@ -712,6 +712,8 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
     const hasBmd = bmdMembers.length > 0
     const webrtcMembers = Object.keys(opts.webrtcMembers || {})
     const hasWebrtc = webrtcMembers.length > 0
+    const presentMembers = Object.keys(opts.presentMembers || {})
+    const hasPresent = presentMembers.length > 0
     // An output whose only consumers are the web server, a stage client or a preview still belongs here:
     // it needs the downscaled frame, and producing that on the main thread was the last routine path that
     // put a full frame in front of the UI's event loop.
@@ -949,6 +951,23 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
                 if (b.pbuf.refs > 0) queued.add(b.pbuf)
             }
         }
+        // The on-screen window of a captured output draws this frame instead of rendering the content a
+        // second time, so it is served the same way the WebRTC host window is
+        if (hasPresent) {
+            const server = presentFrames()
+            const now = Date.now()
+            for (const m of presentMembers) {
+                const want = opts.presentMembers![m]
+                const ti = targetBufs.findIndex((t) => t.width === want.width && t.height === want.height && t.format === 0)
+                const b = ti >= 0 ? targetBufs[ti] : main.format === 0 && main.width === want.width && main.height === want.height ? main : null
+                if (!b) continue
+                const bytes = bytesFor(b.width, b.height, 0)
+                const frame: ServedFrame = { xres: b.width, yres: b.height, format: "bgra", data: b.pbuf.buf.length === bytes ? b.pbuf.buf : b.pbuf.buf.subarray(0, bytes) }
+                servedPacer.set(frame, b.pbuf)
+                server.deliver(m, "PRESENT", m, frame, now)
+                if (b.pbuf.refs > 0) queued.add(b.pbuf)
+            }
+        }
         // Blackmagic: the card's scheduler retains what it is given, so it gets its own copy of the frame at
         // the card's mode (UYVY straight in when the card takes it raw, else BGRA converted by the sender)
         for (const m of bmdMembers) {
@@ -1000,8 +1019,9 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             }
         }
 
-        if (opts.serverStream) {
+        if (opts.serverStream && Date.now() - (lastServerPush.get(id) || 0) >= opts.serverStream.intervalMs) {
             const cfg = opts.serverStream
+            lastServerPush.set(id, Date.now())
             const ti = targetBufs.findIndex((t) => t.width === cfg.width && t.height === cfg.height && t.format === 3)
             if (ti >= 0) {
                 const bytes = cfg.width * cfg.height * 4
@@ -1301,8 +1321,36 @@ function webrtcFrames() {
     return webrtcServer
 }
 
+// last push per output, so an OutputShow viewer is served at its rate and not at the render rate
+const lastServerPush = new Map<string, number>()
+
+// The on-screen window of a captured output: it draws the capture instead of rendering the content
+// again, over the same shared-memory transport
+let presentServer: FrameServer | null = null
+function presentFrames() {
+    if (presentServer) return presentServer
+    presentServer = new FrameServer({
+        log: (text) => console.info("[present frames]", text),
+        onListening: (info) => port.postMessage({ type: "presentWs", port: info.port, token: info.token }),
+        onNeedTarget: (targetId) => port.postMessage({ type: "presentNeedTarget", targetId }),
+        retain: (frame) => {
+            const pb = servedPacer.get(frame)
+            if (pb) pb.refs++
+        },
+        release: (frame) => {
+            const pb = servedPacer.get(frame)
+            if (pb) releasePacerRef(pb)
+        },
+        stats: !!process.env.FS_CAP_STATS
+    })
+    return presentServer
+}
+
 port.on("message", (msg: any) => {
     switch (msg?.type) {
+        case "presentReset":
+            if (presentServer) for (const m of Object.keys(presentServer.targets())) presentServer.drop(m)
+            break
         case "webrtcReset":
             // the host window went away or (re)loaded: forget its targets so the next frame asks again
             if (webrtcServer) for (const m of Object.keys(webrtcServer.targets())) webrtcServer.drop(m)

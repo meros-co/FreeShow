@@ -19,7 +19,7 @@ export type CaptureFrameOpts = {
     format: number // readback format of the main buffer (0 BGRA, 1 UYVY, 2 UYVA)
     convertCheck?: boolean // FS_CONVERT_CHECK: take the frame as BGRA too so the worker can check the GPU convert
     stageStream?: { width: number; height: number; quality: number; intervalMs: number } | null // subscribed stage clients
-    serverStream?: { width: number; height: number } | null // connected OutputShow clients
+    serverStream?: { width: number; height: number; intervalMs: number } | null // connected OutputShow clients
     mainFormat?: number // the format full-size members send in (differs from `format` only on the CPU-target path)
     transparent?: boolean
     dstW?: number
@@ -38,7 +38,8 @@ export type CaptureFrameOpts = {
     cpuTargets?: boolean // addon can't produce targets on the GPU here: main is BGRA and targets are CPU-derived
     rtmpMembers?: { [id: string]: { width: number; height: number } } // members streaming RTMP, at their broadcast size
     bmdMembers?: { [id: string]: { width: number; height: number; format: number; framerate: number } } // members on a Blackmagic device, at the card's mode
-    webrtcMembers?: { [id: string]: { width: number; height: number } } // members streaming WebRTC: a BGRA frame at the output's size for the host window
+    webrtcMembers?: { [id: string]: { width: number; height: number } }
+    presentMembers?: { [id: string]: { width: number; height: number } } // on-screen windows drawing the capture // members streaming WebRTC: a BGRA frame at the output's size for the host window
 }
 
 export class NdiSender {
@@ -87,6 +88,7 @@ export class NdiSender {
     static bmdMessageHandler: ((msg: any) => void) | null = null
     // WebRTC host wiring (`webrtc*` messages from the worker's frame server)
     static webrtcMessageHandler: ((msg: any) => void) | null = null
+    static presentMessageHandler: ((msg: any) => void) | null = null
     // live input composited into a capture (`video*` messages)
     static videoLayerHandler: ((msg: any) => void) | null = null
 
@@ -116,6 +118,10 @@ export class NdiSender {
         }
         if (String(msg.type).startsWith("bmd")) {
             this.bmdMessageHandler?.(msg)
+            return
+        }
+        if (String(msg.type).startsWith("present")) {
+            this.presentMessageHandler?.(msg)
             return
         }
         if (String(msg.type).startsWith("webrtc")) {
@@ -243,6 +249,10 @@ export class NdiSender {
     static captureDoneCallbacks: { [id: string]: (seq: number, tl?: { recv: number; cS: number; cE: number; fS: number; fE: number; enq: number } | null) => void } = {}
     static releaseTextureCallbacks: { [id: string]: (seq: number) => void } = {}
 
+    static postToWorker(msg: any) {
+        this.worker?.postMessage(msg)
+    }
+
     static captureFrameNDI(id: string, source: any, opts: CaptureFrameOpts) {
         // the render is shared: any member with an NDI sender, or any OMT sender in the shared worker
         // (opts.omt), keeps the capture going without an NDI sender on the renderer itself
@@ -251,7 +261,7 @@ export class NdiSender {
         // scaled frame: an OutputShow or stage viewer, or a preview. Refusing those sent the frame back to
         // main to be read, converted and encoded there.
         const wantsScaled = !!opts.stageStream || !!opts.serverStream || ((opts.dstW || 0) > 0 && (opts.dstH || 0) > 0)
-        const anyWorkerConsumer = Object.keys(opts.webrtcMembers || {}).length > 0 || Object.keys(opts.rtmpMembers || {}).length > 0 || wantsScaled
+        const anyWorkerConsumer = Object.keys(opts.webrtcMembers || {}).length > 0 || Object.keys(opts.rtmpMembers || {}).length > 0 || Object.keys(opts.presentMembers || {}).length > 0 || wantsScaled
         if ((!anyNdi && !opts.omt && !anyWorkerConsumer) || !this.getWorker()) return false
         this.worker!.postMessage({ type: "captureFrame", id, source, opts })
         return true

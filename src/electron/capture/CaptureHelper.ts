@@ -14,7 +14,10 @@ export class CaptureHelper {
 
     private static framerates: { [key: string]: number } = {
         stage: 20, // StageShow
-        server: 10, // 30 // OutputShow
+        // OutputShow. Its frame is produced by the GPU and delivered by the worker, so it costs main
+        // nothing and has no reason to run slower than any other connected consumer. The socket's own
+        // ack gate is the real limiter: a browser that cannot keep up is simply sent fewer frames.
+        server: 30,
         webrtc: 30, // WebRTC (canvas stream, up to 30 fps)
         rtmp: 30, // RTMP
         unconnected: 1,

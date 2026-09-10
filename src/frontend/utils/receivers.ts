@@ -52,6 +52,7 @@ import {
     projects,
     shows,
     showsCache,
+    presenting,
     slideTimelineSpeedMultiplier,
     special,
     stageShows,
@@ -244,6 +245,8 @@ export const receiveOUTPUTasOUTPUT: any = {
             return a
         })
     },
+    // this window now draws the capture rather than rendering the content a second time
+    PRESENT: ({ active }: { id: string; active: boolean }) => presenting.set(!!active),
     CLOSE_AD: () => closeAd.set(true),
     LANGUAGE: (a: any) => setLanguage(a),
     STYLES: (a: any) => styles.set(a),
