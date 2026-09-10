@@ -418,11 +418,21 @@ export class OutputLifecycle {
         return Date.now() - at < this.getOsrTargetInterval(id) * this.OFF_MAIN_ACTIVE_FRAMES
     }
 
-    // The ceiling on how fast any output renders: the highest rate the output frame-rate setting offers.
-    // It exists only so nothing can ask for a rate no setting could have requested - what an output
-    // actually renders at is what it is configured for, which updateRenderRate takes from its members.
+    // The ceiling on how fast any output renders. It has to leave room for both things that can ask for a
+    // rate: a physical display running at whatever mode the OS gave it, and a consumer set to the fastest
+    // the frame-rate setting offers. It bounds nothing in normal use - updateRenderRate takes the rate
+    // from the members themselves - it only stops a nonsense value asking for more than either could want.
+    private static renderCeiling = 0
     static get OSR_RENDER_FPS(): number {
-        return CaptureHelper.MAX_CONFIGURABLE_FPS
+        if (this.renderCeiling) return this.renderCeiling
+        let best = CaptureHelper.MAX_CONFIGURABLE_FPS
+        try {
+            for (const d of screen.getAllDisplays()) best = Math.max(best, d.displayFrequency || 0)
+        } catch {
+            // no display information (headless): the configurable maximum stands on its own
+        }
+        this.renderCeiling = Math.max(1, Math.round(best))
+        return this.renderCeiling
     }
 
     private static attachOsrCapture(window: BrowserWindow, id: string) {
@@ -572,12 +582,19 @@ export class OutputLifecycle {
     private static lastGateLogged = 0
     private static offMain = new Map<string, OffMainState>()
 
-    // An output whose on-screen window draws the capture needs frames at the rate that output is set to
-    // run at. NOT the refresh rate of the monitor it happens to be on: a display output runs at what it
-    // is configured for in FreeShow, whatever the screen could manage.
+    // An output whose on-screen window draws the capture needs frames at the rate that window can show
+    // them, which for a physical display is the mode the OS is running it at. FreeShow has no frame-rate
+    // setting for a display output, so there is nothing configured to prefer over it.
     static presentFps(id: string): number {
         if (!OutputPresenter.isPresenting(id)) return 0
-        return CaptureHelper.configuredFramerate(id)
+        const bounds = OutputHelper.getOutput(id)?.intendedBounds
+        try {
+            const display = bounds ? screen.getDisplayMatching(bounds) : screen.getPrimaryDisplay()
+            if (display?.displayFrequency) return Math.round(display.displayFrequency)
+        } catch {
+            // no display information: fall back to the ceiling below
+        }
+        return this.OSR_RENDER_FPS
     }
 
     private static rendererTargetFps(id: string): number {

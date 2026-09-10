@@ -26,18 +26,10 @@ export class CaptureHelper {
     }
     static customFramerates: { [key: string]: { [key: string]: number } } = {}
 
-    // The highest rate an output can be set to, from the frame-rate setting in Outputs.svelte. It bounds
-    // the render rate only so a nonsense value cannot ask for something no setting could have requested;
-    // what an output actually renders at is what it is configured for (configuredFramerate below).
+    // The highest rate an output can be SET to, from the frame-rate setting in Outputs.svelte. A physical
+    // display has no such setting - it runs at whatever mode the OS gave it - so this bounds only the
+    // consumers that do have one.
     static readonly MAX_CONFIGURABLE_FPS = 60
-
-    // The rate THIS output is configured to run at in FreeShow. Never the monitor's refresh rate: an
-    // output runs at what it is set to whatever the display it lands on could manage.
-    static configuredFramerate(id: string): number {
-        const custom = this.customFramerates[id]
-        const configured = Number(custom?.ndi || custom?.omt || custom?.blackmagic || 0)
-        return configured > 0 ? configured : this.framerates.connected
-    }
 
     // the rate each consumer starts at, so callers never restate one as a literal
     static defaultFramerates(): { [key: string]: number } {
