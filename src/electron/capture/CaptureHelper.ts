@@ -110,7 +110,7 @@ export class CaptureHelper {
     static updateRenderRate(rendererId: string) {
         const output = OutputHelper.getOutput(rendererId)
         const win = OutputHelper.renderWindow(output)
-        if (!(output as any)?.osr || (output as any)?.follower || !win || win.isDestroyed()) return
+        if (!(output as any)?.osr || (output as any)?.follower || (output as any)?.presenter || !win || win.isDestroyed()) return
 
         let fps = 0
         for (const m of RenderGroups.members(rendererId)) {

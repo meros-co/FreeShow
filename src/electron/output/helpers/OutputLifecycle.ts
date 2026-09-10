@@ -104,13 +104,20 @@ export class OutputLifecycle {
 
         this.clearPendingCaptureStart(id)
 
+        // A displayed output cannot render offscreen, so it used to render its own window even when
+        // another output was already rendering exactly this content. It now joins that render and draws
+        // its frames instead: one render and one readback, however many outputs show it. Only an
+        // EXISTING renderer is joined, so an output alone with its content is untouched.
+        const presentRenderer = !this.isOsrOutput(output) && !output.blackmagic ? RenderGroups.existingRenderer(output) : null
+
         // Shared-render: outputs with identical content share one render window
-        const shareEligible = RenderGroups.enabled && this.canShareRender(output)
+        const shareEligible = RenderGroups.enabled && (this.canShareRender(output) || !!presentRenderer)
         const group = shareEligible ? RenderGroups.add(id, output) : { isRenderer: true, rendererId: id }
         if (!group.isRenderer) {
             const rendererWin = OutputHelper.getOutput(group.rendererId)?.window
             if (rendererWin && !rendererWin.isDestroyed()) {
-                await this.createFollowerOutput(id, output, group.rendererId, rendererWin)
+                if (presentRenderer) await this.createPresentingOutput(id, output, group.rendererId)
+                else await this.createFollowerOutput(id, output, group.rendererId, rendererWin)
                 return
             }
             RenderGroups.remove(id)
@@ -173,6 +180,42 @@ export class OutputLifecycle {
     // size), so they join a render like NDI/OMT ones do.
     private static canShareRender(output: Output): boolean {
         return (!!output.ndi || !!output.omt || !!output.webrtc || !!output.rtmp) && !output.blackmagic && this.isOsrOutput(output)
+    }
+
+    // A displayed member of a render group: it owns the window the audience sees, but the content in it
+    // is the group renderer's frame, drawn from the one readback that render already produces.
+    private static async createPresentingOutput(id: string, output: Output, rendererId: string) {
+        OutputHelper.Bounds.disableWindowMoveListener()
+
+        const bounds = OutputVisibility.resolveOutputBounds(output)
+        const renderBounds = OutputHelper.Bounds.getRenderBounds(output, bounds)
+        const window = this.createOutputWindow({ ...renderBounds, alwaysOnTop: output.alwaysOnTop !== false, backgroundColor: output.transparent ? "#00000000" : "#000000" }, id, output.name, output)
+
+        OutputHelper.setOutput(id, {
+            window,
+            presenter: true,
+            renderGroupRenderer: rendererId,
+            // nothing here is captured with capturePage: the frame comes from the renderer's readback
+            osr: true,
+            invisible: output.invisible,
+            boundsLocked: output.boundsLocked,
+            screen: output.screen,
+            intendedBounds: bounds,
+            sendSize: { width: bounds.width, height: bounds.height },
+            transparent: output.transparent,
+            webrtcData: output.webrtcData,
+            rtmpData: output.rtmpData
+        })
+        OutputHelper.Bounds.updateBounds({ id, bounds })
+        this.updateWindowConstraints(id)
+        this.fitRendererToGroup(rendererId)
+        OutputPresenter.start(id, window)
+
+        this.pendingCaptureStart[id] = setTimeout(() => {
+            delete this.pendingCaptureStart[id]
+            if (!CaptureHelper.Lifecycle || !OutputHelper.getOutput(id)) return
+            CaptureHelper.Lifecycle.startCapture(id, { ndi: output.ndi || false, omt: output.omt || false })
+        }, 1200)
     }
 
     private static async createFollowerOutput(id: string, output: Output, rendererId: string, rendererWindow: BrowserWindow) {
@@ -306,7 +349,7 @@ export class OutputLifecycle {
     // The surface exists only while a capture is running, so an output nobody watches renders once.
     static createCaptureSurface(id: string): BrowserWindow | null {
         const output = OutputHelper.getOutput(id)
-        if (!output || (output as any).follower || output.osr) return null
+        if (!output || (output as any).follower || output.presenter || output.osr) return null
 
         const existing = output.captureWindow
         if (existing && !existing.isDestroyed()) return existing
@@ -1109,7 +1152,9 @@ export class OutputLifecycle {
             // (the web server, a stage client, a preview): the worker produces that on the GPU, where
             // main used to resolve a full-resolution readback into its own process.
             const groupInfo = CaptureHelper.Transmitter.groupOffMainInfo(offMainIds.length ? offMainIds : members)
-            const canOffMain = groupInfo.eligible && (offMainIds.length > 0 || groupInfo.needsScaled)
+            // a presenting member is a consumer too: its window has nothing to show without this frame
+            const anyPresenting = members.some((m) => OutputPresenter.isPresenting(m))
+            const canOffMain = groupInfo.eligible && (offMainIds.length > 0 || groupInfo.needsScaled || anyPresenting)
             if (canOffMain) {
                 // the worker now owns delivery for this frame: drop anything main was still holding, or the
                 // send timer keeps re-transmitting a stale frame alongside the worker's fresh one
@@ -1236,7 +1281,7 @@ export class OutputLifecycle {
 
         // Shared-render bookkeeping: drop this output from its group. If it was the RENDERER and followers
         // remain, the first follower must be promoted to render (given its own window) so the group keeps going.
-        const wasShared = RenderGroups.enabled && (!!(OutputHelper.getOutput(id) as any)?.follower || RenderGroups.isRenderer(id))
+        const wasShared = RenderGroups.enabled && (!!(OutputHelper.getOutput(id) as any)?.follower || !!(OutputHelper.getOutput(id) as any)?.presenter || RenderGroups.isRenderer(id))
         const groupInfo = wasShared ? RenderGroups.remove(id) : null
 
         // A FOLLOWER owns no window — just tear down its senders/capture, never touch the shared window.
@@ -1251,6 +1296,7 @@ export class OutputLifecycle {
             return
         }
 
+        OutputPresenter.stop(id)
         CaptureHelper.Lifecycle.stopCapture(id)
         NdiSender.stopSenderNDI(id)
         OmtSender.stopSenderOMT(id)

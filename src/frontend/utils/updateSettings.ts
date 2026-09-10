@@ -224,7 +224,16 @@ function convertTriggersToActions(data: any) {
 
 export function restartOutputs(specificId = "") {
     const allOutputs = keysToID(get(outputs))
-    const outputIds = specificId ? [specificId] : allOutputs.filter((a) => a.enabled).map(({ id }) => id)
+    // Outputs that render offscreen are created first. A displayed output joins a render of its content
+    // that already exists rather than starting a second one, so whether it can do that must not depend on
+    // which output happens to come first in the settings.
+    const rendersOffscreen = (o: Output) => !!(o.ndi || o.omt || o.webrtc || o.rtmp || o.blackmagic || o.invisible)
+    const outputIds = specificId
+        ? [specificId]
+        : allOutputs
+              .filter((a) => a.enabled)
+              .sort((a, b) => Number(rendersOffscreen(b)) - Number(rendersOffscreen(a)))
+              .map(({ id }) => id)
 
     outputIds.forEach((id: string) => {
         const output: Output = get(outputs)[id]

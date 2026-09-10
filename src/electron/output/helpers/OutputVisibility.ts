@@ -8,8 +8,22 @@ import { setOutputAlwaysOnTop } from "./OutputAlwaysOnTop"
 import { OutputBounds } from "./OutputBounds"
 
 export class OutputVisibility {
-    static toggleOutputs(data: { outputs: (Output & { id: string })[]; state: boolean; force?: boolean; autoStartup?: boolean; autoPosition?: boolean }) {
+    static async toggleOutputs(data: { outputs: (Output & { id: string })[]; state: boolean; force?: boolean; autoStartup?: boolean; autoPosition?: boolean }) {
         const newStates: { id: string; active: boolean | "invisible" }[] = []
+
+        // The list arrives in display order, which decides window stacking, so it is not reordered here.
+        // Creation order is a different matter: an output that renders offscreen must be created before a
+        // displayed one of the same content, or the displayed one finds no render to join and starts a
+        // second one of it. Awaited, so the loop below finds these windows already built rather than
+        // creating them a second time.
+        const rendersOffscreen = (o: Output) => !!(o.ndi || o.omt || o.webrtc || o.rtmp || o.blackmagic || o.invisible)
+        const needsWindow = (o: Output & { id: string }) => {
+            const win = OutputHelper.getOutput(o.id)?.window
+            return !win || win.isDestroyed()
+        }
+        for (const output of data.outputs.filter(needsWindow).filter(rendersOffscreen)) {
+            await OutputHelper.Lifecycle.createOutput(output)
+        }
 
         data.outputs.forEach((output) => {
             const force = !!(data.force || output.boundsLocked)
