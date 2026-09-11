@@ -1,11 +1,9 @@
 // The osr-capture capability contract, asserted against the addon built for THIS platform.
 //
-// Every capability the app relies on is listed here once. A capability added for one backend has to be
-// added to this list, and this check then fails on the other two until they have it as well — which is
-// the point: parity is a gate rather than an intention. Run under Electron so the addon's ABI matches
-// the one the app loads:  npm run check-capabilities
-//
-// It is also run by scripts/wsl-linux-check.sh, so the Linux backend is checked from Windows.
+// Every capability the app relies on is listed once, so a capability added for one backend fails this
+// check on the others until they have it too. Run under Electron, so the ABI matches the app's:
+//   npm run check-capabilities
+// scripts/wsl-linux-check.sh runs it against the Linux build.
 
 const REQUIRED = {
     // two-phase shared-texture readback: consume (GPU, releases the texture) then finish (copy out)
@@ -43,8 +41,7 @@ const REQUIRED = {
 const MUST_BE_TRUE = ["targetsSupported", "videoLayerSupported"]
 
 function check() {
-    // OSR_MODULE points the check at a specific build (the WSL Linux check uses it to check the module it
-    // just compiled); by default it is whatever the app itself would load
+    // OSR_MODULE points the check at a specific build; by default, whatever the app itself would load
     const target = process.env.OSR_MODULE || "osr-capture"
     let osr
     try {

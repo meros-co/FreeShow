@@ -11,11 +11,9 @@ export class OutputVisibility {
     static async toggleOutputs(data: { outputs: (Output & { id: string })[]; state: boolean; force?: boolean; autoStartup?: boolean; autoPosition?: boolean }) {
         const newStates: { id: string; active: boolean | "invisible" }[] = []
 
-        // The list arrives in display order, which decides window stacking, so it is not reordered here.
-        // Creation order is a different matter: an output that renders offscreen must be created before a
-        // displayed one of the same content, or the displayed one finds no render to join and starts a
-        // second one of it. Awaited, so the loop below finds these windows already built rather than
-        // creating them a second time.
+        // The list is in display order, which decides stacking, so it is not reordered. Creation order is
+        // separate: an offscreen output must exist before a displayed one of the same content, or that one
+        // finds no render to join. Awaited, so the loop below does not create these a second time.
         const rendersOffscreen = (o: Output) => !!(o.ndi || o.omt || o.webrtc || o.rtmp || o.blackmagic || o.invisible)
         const needsWindow = (o: Output & { id: string }) => {
             const win = OutputHelper.getOutput(o.id)?.window

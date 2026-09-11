@@ -356,11 +356,9 @@ export const styles: Writable<{ [key: string]: Styles }> = writable({}) // {}
 
 // OUTPUTS
 export const outputs: Writable<Outputs> = writable({}) // {default}
-// outputs a capture is currently running for, so a preview of one takes the captured frame instead of
-// rendering (and decoding) the content again - written by shouldBeCaptured()
+// outputs a capture is running for, so their previews draw the captured frame (see shouldBeCaptured)
 export const capturedOutputs: Writable<{ [id: string]: boolean }> = writable({})
-// this output window draws the capture instead of rendering its content (the offscreen capture surface
-// is the only render of it) - see electron/output/helpers/OutputPresenter.ts
+// this output window draws the capture instead of rendering its content (see OutputPresenter.ts)
 export const presenting: Writable<boolean> = writable(false)
 // shared-render groups (renderer output id -> member ids); follower previews clone the renderer's mirror
 export const renderGroups: Writable<{ [rendererId: string]: string[] }> = writable({})

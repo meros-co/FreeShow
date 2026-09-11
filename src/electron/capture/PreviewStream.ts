@@ -3,9 +3,8 @@ import { getMainWindow } from ".."
 import { NdiSender } from "../ndi/NdiSender"
 
 // The main window's output previews are fed from the capture, not from their own decode: the readback
-// worker already produces a GPU-downscaled frame of each render, and serves it to the previewing window
-// over the shared-memory transport (capture/FrameServer.ts in the worker, streamLink.ts in the window's
-// preload). Main only tells the window the socket and the token; no preview frame passes through it.
+// worker already produces a GPU-downscaled frame of each render and serves it to the previewing window
+// over the shared-memory transport (capture/FrameServer.ts, streamLink.ts); main relays only the socket.
 export class PreviewStream {
     private static refs: { [outputId: string]: number } = {}
     // widest pixel width any subscriber of an output currently draws its preview at (0 = unknown yet)
@@ -76,8 +75,7 @@ export class PreviewStream {
         window.webContents.send("STREAM_WS", { targetId: outputId, port: this.wsInfo.port, token: this.wsInfo.token })
     }
 
-    // a reloaded or closed window takes its sockets with it: its components re-subscribe when they mount
-    // again, and the worker asks for the target once more
+    // a reloaded or closed window takes its sockets with it; its components re-subscribe when they mount
     private static reset() {
         this.wired.clear()
         this.wanted.clear()

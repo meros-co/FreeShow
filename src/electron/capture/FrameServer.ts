@@ -49,10 +49,7 @@ type Subscriber = {
     ring: ShmRing | null
 }
 
-// Slots a ring starts with: enough that a frame can be written while the previous one is being read. It
-// is a starting point, not a ceiling - a window whose measured round trip needs more gets more (see
-// growRing). It used to be both, so a slow window was silently held to three frames in flight no matter
-// what the measurement asked for.
+// slots a ring starts with; growRing takes it further when the measurement asks
 const SHM_SLOTS = 3
 // smoothing weight for the interval measurement; a weight, not a machine-dependent threshold
 const SMOOTHING = 0.2
@@ -224,8 +221,7 @@ export class FrameServer {
     // in bursts). The round trip used is the best recent one, not the average: a window that falls
     // behind reports longer and longer round trips, and sizing the depth on those would feed the
     // backlog that caused them.
-    // frames that must overlap to keep this window busy: its round trip divided by the source's frame
-    // interval, plus the one being written
+    // frames that must overlap to keep this window busy, plus the one being written
     private neededDepth(subscriber: Subscriber) {
         if (!subscriber.roundTrip || !subscriber.frameInterval) return 1
         return Math.ceil(subscriber.roundTrip / subscriber.frameInterval) + 1
@@ -236,9 +232,8 @@ export class FrameServer {
         return subscriber.ring ? Math.min(depth, subscriber.ring.slots) : depth
     }
 
-    // A ring holds as many frames as the measurement says this window needs. Growing it reallocates the
-    // shared region, so it happens only when the window is idle - with nothing in flight, no reader can be
-    // looking at a slot - and only upwards, since a window that got faster costs nothing by keeping room.
+    // Grow the ring to the depth this window needs. Only while it is idle: reallocating the shared region
+    // under a reader would pull a slot out from under it.
     private growRing(targetId: string, subscriber: Subscriber) {
         const ring = subscriber.ring
         if (!ring || subscriber.inFlight > 0 || subscriber.pending) return
@@ -252,11 +247,9 @@ export class FrameServer {
         subscriber.ring = grown
     }
 
-    // A window that stops acking - a hung renderer, a page torn down without closing its socket - leaves
-    // its slots busy and its in-flight count high, and this target would never send again. Silence longer
-    // than a whole sample window of round trips is not a slow window; reclaim what it was given and let it
-    // start again. The bound comes from what has been measured for this subscriber, so a genuinely slow
-    // window is never cut off: it is always acking something.
+    // A window that stops acking leaves its slots busy for good, so this target would never send again.
+    // The bound is its own measured round trips, so a merely slow window - which is always acking
+    // something - is never cut off.
     private sweepStalled() {
         const now = Date.now()
         for (const targetId of Object.keys(this.subscribers)) {

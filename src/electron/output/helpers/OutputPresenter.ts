@@ -3,11 +3,8 @@ import { OUTPUT } from "../../../types/Channels"
 import { NdiSender } from "../../ndi/NdiSender"
 import { OutputHelper } from "../OutputHelper"
 
-// A captured output that is also shown on a monitor must render its content ONCE. The render is the
-// offscreen surface the capture reads; the on-screen window draws that same frame instead of rendering
-// the content a second time. Frames reach it from the capture worker over the shared-memory transport
-// (capture/FrameServer.ts in the worker, streamLink.ts in the window's preload) — main relays only the
-// socket details and never a pixel.
+// An output shown on a monitor whose content is rendered elsewhere: its window draws that render's
+// frames, delivered by the capture worker over shared memory (FrameServer.ts, streamLink.ts).
 export class OutputPresenter {
     private static wsInfo: { port: number; token: string } | null = null
     private static presenting = new Set<string>()

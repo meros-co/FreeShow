@@ -32,9 +32,7 @@
     }
     $: if ($currentWindow === "output") send(OUTPUT, ["MOVE"], { enabled: enableOutputMove })
 
-    // Presenter mode: this output's content is rendered once, offscreen, for the capture, and this window
-    // draws that same frame instead of rendering (and decoding) it a second time. Frames arrive from the
-    // capture worker over shared memory, so nothing passes through the main process.
+    // presenter mode: this window draws the capture's frames rather than rendering the content itself
     let presentCanvas: HTMLCanvasElement | null = null
     const presentRenderer = new StreamCanvasRenderer()
     let unlistenPresent: (() => void) | null = null

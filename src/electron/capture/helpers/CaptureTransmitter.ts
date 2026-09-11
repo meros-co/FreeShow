@@ -148,11 +148,7 @@ export class CaptureTransmitter {
         return this.osrModule
     }
 
-    // A consumer served from the main process reads the frame back, resizes and encodes it, all on the
-    // thread everything else in the app runs on. What that costs is a property of the machine and the
-    // frame size, so it is measured rather than guessed from a pixel count: the rate is capped so this
-    // work can take no more than HEAVY_MAIN_SHARE of the main thread, whatever it turns out to cost here.
-    // Only the legacy path reaches this - a captured output's consumers are served by the worker.
+    // legacy path only: cap main-thread consumers at this share of the thread, from their measured cost
     private static readonly HEAVY_MAIN_SHARE = 0.5
     private static readonly HEAVY_COST_SMOOTHING = 0.2
     private static heavyCostMs: { [captureId: string]: number } = {}
@@ -197,11 +193,8 @@ export class CaptureTransmitter {
 
         const framerates = captureOptions.framerates
 
-        // While the off-main pipeline is running for this output the worker produces and delivers every
-        // consumer's frame from the GPU readback - senders, Blackmagic, WebRTC, RTMP, OutputShow and
-        // stage alike. Serving any of them from main as well would double-send, and would put back the
-        // readback, convert and encode this whole path exists to remove. Checked before anything is
-        // scheduled, so a frame the worker owns costs main no timer either.
+        // the worker serves every consumer while it owns this output; serving them here too would
+        // double-send. Checked before anything is scheduled, so such a frame costs main no timer either.
         if (OutputHelper.Lifecycle.isOffMainActive(captureId)) return
         if (!raw && (!image || image.isEmpty())) return
 
@@ -374,11 +367,8 @@ export class CaptureTransmitter {
         }
     }
 
-    // The width every OutputShow viewer is served. What each one costs is its area, so the bandwidth the
-    // server hands out is viewers x width^2: holding that roughly constant as viewers arrive means the
-    // width falls with the square root of their number. That was a table of breakpoints (below a third of
-    // the size above twenty viewers, and so on) which only ever applied on the fallback path, while the
-    // worker sent full width to everyone - so the two disagreed about what a viewer costs.
+    // A viewer costs its area, so bandwidth is viewers x width^2; holding that constant means the width
+    // falls with the square root of the viewer count.
     static serverFrameWidth(): number {
         const viewers = Math.max(1, getConnections("OUTPUT_STREAM"))
         const width = Math.round(this.HEAVY_IMAGE_MAX_WIDTH / Math.sqrt(viewers))
@@ -461,8 +451,7 @@ export class CaptureTransmitter {
     }
 
     // MAIN (STAGE OUTPUT)
-    // Legacy path only: reached when an output cannot be captured offscreen, so the worker never sees
-    // its frame. Connected stage clients otherwise get a frame the GPU produced and the worker encoded.
+    // legacy path only: an output that cannot be captured offscreen, whose frame the worker never sees
     static sendBufferToMain(captureId: string, image: NativeImage) {
         if (!image) return
         if (getConnections("STAGE") === 0 || getStageStreamSubscriberIds().length === 0) return
@@ -472,8 +461,7 @@ export class CaptureTransmitter {
 
     // push a downscaled JPEG frame to subscribed web StageShow clients
     // clients without a visible "current output" mirror never subscribe, so text-only stage displays receive nothing
-    // What connected OutputShow clients want. They take raw RGBA, so the GPU can produce exactly that
-    // and main forwards the bytes without reading back or converting anything.
+    // what connected OutputShow clients want; they take raw RGBA, which the GPU produces directly
     static serverStreamRequest(captureId: string): { width: number; intervalMs: number } | null {
         if (getConnections("OUTPUT_STREAM") === 0) return null
         const fps = OutputHelper.getOutput(captureId)?.captureOptions?.framerates?.server || CaptureHelper.defaultFramerates().server
@@ -485,8 +473,7 @@ export class CaptureTransmitter {
         toServer(OUTPUT_STREAM, { channel: "STREAM", data: { id: outputId, time: Date.now(), buffer, size } })
     }
 
-    // A remote controller asks for a thumbnail every so often and waits for it. While one is outstanding
-    // the worker encodes the frame it already has, so the main process never takes a capture of its own.
+    // a controller asks for a thumbnail and waits; the worker encodes the frame it already has
     private static thumbWanted = new Set<string>()
 
     static requestControllerThumbnail(outputId: string) {
@@ -505,8 +492,6 @@ export class CaptureTransmitter {
 
     // What subscribed stage clients want, so the capture worker can produce and encode it. Returning
     // null means nobody is watching and no frame should be made for them at all.
-    // How often a stage client is sent a frame is its configured rate and nothing else. There used to be a
-    // second number here (a 100ms floor, so 10fps) that disagreed with the configured 20, and the floor won.
     private static stagePushIntervalMs() {
         return 1000 / Math.max(1, CaptureHelper.defaultFramerates().stage)
     }

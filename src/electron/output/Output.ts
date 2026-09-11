@@ -4,13 +4,11 @@ import type { CaptureOptions } from "../capture/CaptureOptions"
 
 export class Output {
     window!: BrowserWindow
-    // A displayed output's window cannot be offscreen, so while such an output is captured it gets a
-    // hidden offscreen surface rendering the same content, and that is what the capture reads. It is not
-    // created when another output is already rendering this content: see `presenter`.
+    // a displayed output's own window cannot be offscreen, so its capture reads this hidden surface
+    // instead; not created when another output already renders this content (see presenter)
     captureWindow?: BrowserWindow
-    // This output shows on a monitor but renders nothing: another output's render of the same content is
-    // read back once and this window draws it. Unlike a follower it owns its window - it just never puts
-    // content in it. One render, one readback, however many outputs show it.
+    // shows on a monitor but renders nothing: this window draws another output's render of the same
+    // content. Unlike a follower it owns its window - it just never puts content in it.
     presenter?: boolean
     osr?: boolean // captured via offscreen paint events instead of the capturePage poll
     // shared-render (FS_SHARE_RENDER): this output is a FOLLOWER sharing `renderGroupRenderer`'s window +

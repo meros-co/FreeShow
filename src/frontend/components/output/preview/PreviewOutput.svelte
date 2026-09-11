@@ -24,9 +24,8 @@
 
     $: stageOutput = $outputs[outputId]?.stageOutput
 
-    // A captured output renders offscreen and is read back; its preview is that readback, downscaled, so
-    // the preview never decodes the media again. Which outputs those are is whatever a capture is actually
-    // running for - a displayed output being watched in a browser is captured just as an NDI one is.
+    // a captured output's preview is its readback downscaled, so the preview never decodes the media
+    // again; which outputs those are is whatever a capture is actually running for
     $: output = $outputs[outputId]
     $: captured = !!output && !!$capturedOutputs[outputId]
 

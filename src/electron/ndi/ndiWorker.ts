@@ -806,8 +806,7 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             releaseTexture()
         }
 
-        // The app window's previews are served straight from here over shared memory. Relaying them
-        // through main structured-cloned a whole preview frame per output per frame on the main thread.
+        // the app window's previews are served straight from here, so main never holds a preview frame
         if (scaled && scaled.length) {
             const server = previewFrames()
             const now = Date.now()
@@ -958,8 +957,7 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
                 if (b.pbuf.refs > 0) queued.add(b.pbuf)
             }
         }
-        // The on-screen window of a captured output draws this frame instead of rendering the content a
-        // second time, so it is served the same way the WebRTC host window is
+        // the on-screen window of a captured output, served like the WebRTC host window
         if (hasPresent) {
             const server = presentFrames()
             const now = Date.now()
@@ -1037,8 +1035,7 @@ async function captureAndSend(id: string, source: any, opts: { size: { width: nu
             }
         }
 
-        // a remote controller asked for a thumbnail: encode the frame it is already being given rather
-        // than taking a whole new capture of the window on the main thread
+        // a controller asked for a thumbnail: encode the frame already to hand
         if (opts.thumbStream) {
             const cfg = opts.thumbStream
             const ti = targetBufs.findIndex((t) => t.width === cfg.width && t.height === cfg.height && t.format === 3)
@@ -1368,8 +1365,7 @@ function previewFrames() {
 // last push per output, so an OutputShow viewer is served at its rate and not at the render rate
 const lastServerPush = new Map<string, number>()
 
-// The on-screen window of a captured output: it draws the capture instead of rendering the content
-// again, over the same shared-memory transport
+// the on-screen window of a captured output, over the same shared-memory transport
 let presentServer: FrameServer | null = null
 function presentFrames() {
     if (presentServer) return presentServer

@@ -8,8 +8,7 @@ import { CaptureHelper } from "../CaptureHelper"
 import { CaptureTransmitter } from "./CaptureTransmitter"
 
 export class CaptureLifecycle {
-    // how soon to look again when a device refused a frame: no point waiting longer than the fastest
-    // rate anything on this machine could want one
+    // how soon to look again when a device refused a frame
     private static get FALLBACK_FPS() {
         return OutputHelper.Lifecycle.OSR_RENDER_FPS
     }
@@ -180,11 +179,8 @@ export class CaptureLifecycle {
 
         const baseCaptureFrameRate = CaptureHelper.getMaxActiveFramerate(frameRates, options)
 
-        // Blackmagic backpressure used to be a table mapping this PROCESS's external memory in megabytes
-        // to a frame rate - numbers that mean different things on an 8GB machine and a 128GB one, and that
-        // describe the whole process rather than the card that is actually behind. The card's own buffer
-        // depth is the real signal and the worker already gates on it per frame (see BlackmagicSender), with
-        // canAcceptFrame skipping the capture entirely while it cannot take one.
+        // Blackmagic backpressure is the card's own buffer depth, gated per frame in BlackmagicSender;
+        // canAcceptFrame skips the capture entirely while it cannot take one.
 
         // static content - capture at a low rate until a change is detected
         // (Blackmagic and NDI frames bypass change detection / idle backoff to maintain video stream clocks)

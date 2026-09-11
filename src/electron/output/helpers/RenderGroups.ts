@@ -53,9 +53,7 @@ export class RenderGroups {
         return best
     }
 
-    // The id already rendering this content, if any. A displayed output joins an existing render rather
-    // than starting a second one of the same thing; it never starts a group of its own, so an output that
-    // is alone with its content keeps rendering in its own window exactly as before.
+    // the id already rendering this content, if any; callers join it rather than starting a second render
     static existingRenderer(output: Output): string | null {
         if (!this.enabled) return null
         const members = this.groups[this.computeKey(output)]

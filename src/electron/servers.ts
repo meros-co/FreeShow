@@ -207,9 +207,8 @@ function initialize(id: ServerName, socket: Socket) {
             const window = OutputHelper.getOutput(outputId)?.window
             if (!window || window.isDestroyed()) return
 
-            // The capture worker already has this output's frame and can encode a thumbnail from it. Only
-            // an output nothing is capturing has no frame to take, and that is the one case left where the
-            // main process captures the window itself.
+            // the worker encodes the thumbnail from the frame it already has; only an output nothing is
+            // capturing has no such frame, and that is the one case left that captures on main
             CaptureHelper.Transmitter.requestControllerThumbnail(outputId)
             if (OutputHelper.Lifecycle.isOffMainActive(outputId)) return
 

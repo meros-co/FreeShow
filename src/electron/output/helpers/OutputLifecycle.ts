@@ -104,10 +104,8 @@ export class OutputLifecycle {
 
         this.clearPendingCaptureStart(id)
 
-        // A displayed output cannot render offscreen, so it used to render its own window even when
-        // another output was already rendering exactly this content. It now joins that render and draws
-        // its frames instead: one render and one readback, however many outputs show it. Only an
-        // EXISTING renderer is joined, so an output alone with its content is untouched.
+        // a displayed output joins a render of its content that ALREADY exists and draws its frames; it
+        // never starts a group, so an output alone with its content renders its own window as before
         const presentRenderer = !this.isOsrOutput(output) && !output.blackmagic ? RenderGroups.existingRenderer(output) : null
 
         // Shared-render: outputs with identical content share one render window
@@ -182,8 +180,7 @@ export class OutputLifecycle {
         return (!!output.ndi || !!output.omt || !!output.webrtc || !!output.rtmp) && !output.blackmagic && this.isOsrOutput(output)
     }
 
-    // A displayed member of a render group: it owns the window the audience sees, but the content in it
-    // is the group renderer's frame, drawn from the one readback that render already produces.
+    // a displayed group member: it owns the window the audience sees and draws the renderer's readback
     private static async createPresentingOutput(id: string, output: Output, rendererId: string) {
         OutputHelper.Bounds.disableWindowMoveListener()
 
@@ -342,11 +339,9 @@ export class OutputLifecycle {
         return !!(output.ndi || output.omt || output.webrtc || output.rtmp || output.blackmagic || output.invisible)
     }
 
-    // A displayed output needs a real on-screen window, and capturing that window means capturePage on
-    // the main thread — the one thing no video path may do. While such an output is actually captured,
-    // render the same content a second time into a hidden offscreen surface and capture that instead:
-    // the frame arrives as a GPU texture the worker converts, and the visible window keeps displaying.
-    // The surface exists only while a capture is running, so an output nobody watches renders once.
+    // An on-screen window can only be captured with capturePage on main, so a captured displayed output
+    // renders offscreen as well and the capture reads that. Only while a capture is running, and only
+    // when no other output already renders this content (that case presents instead).
     static createCaptureSurface(id: string): BrowserWindow | null {
         const output = OutputHelper.getOutput(id)
         if (!output || (output as any).follower || output.presenter || output.osr) return null
@@ -399,13 +394,9 @@ export class OutputLifecycle {
         }
     }
 
-    // The worker is producing this output's scaled frames. Consumers served that way (OutputShow, stage)
-    // must not also be served from main, or a moment where the off-main path declines one frame leaves the
-    // main-side timer re-sending a stale one beside the worker's fresh ones.
+    // whether the worker is producing this output's frames, so main does not serve the same consumers
     private static offMainAt = new Map<string, number>()
-    // How long after a forwarded frame the worker still counts as owning this output. A fixed second meant
-    // something different at 60fps and at 5; it is a few of THIS output's frame intervals, so a rate change
-    // does not change what "recently" means.
+    // how long after a forwarded frame the worker still counts as owning this output, in its own frames
     private static readonly OFF_MAIN_ACTIVE_FRAMES = 4
 
     static noteOffMain(id: string) {
@@ -418,10 +409,8 @@ export class OutputLifecycle {
         return Date.now() - at < this.getOsrTargetInterval(id) * this.OFF_MAIN_ACTIVE_FRAMES
     }
 
-    // The ceiling on how fast any output renders. It has to leave room for both things that can ask for a
-    // rate: a physical display running at whatever mode the OS gave it, and a consumer set to the fastest
-    // the frame-rate setting offers. It bounds nothing in normal use - updateRenderRate takes the rate
-    // from the members themselves - it only stops a nonsense value asking for more than either could want.
+    // Room for both things that can ask for a rate: a display at whatever mode the OS gave it, and a
+    // consumer at the fastest the frame-rate setting offers. updateRenderRate picks the actual rate.
     private static renderCeiling = 0
     static get OSR_RENDER_FPS(): number {
         if (this.renderCeiling) return this.renderCeiling
@@ -566,9 +555,7 @@ export class OutputLifecycle {
     // Computes per-renderer pipeline depth: ceil(targetFps * minRtt) + 1.
     // Limits how many frames are allowed in-flight to prevent queue bloating while keeping throughput high.
     private static readonly RTT_WINDOW_SAMPLES = 300
-    // How many readbacks can be in flight at once is the ADDON's limit, so it is read from the addon
-    // rather than restated here. Restating it meant the two could drift: too high and every output stalls
-    // against a limit nothing in this process can see, too low and capacity sits unused.
+    // in-flight readbacks are limited by the addon, so the limit is read from it rather than restated
     private static addonMaxPool = 0
     private static get ADDON_MAX_POOL(): number {
         if (this.addonMaxPool) return this.addonMaxPool
@@ -582,9 +569,8 @@ export class OutputLifecycle {
     private static lastGateLogged = 0
     private static offMain = new Map<string, OffMainState>()
 
-    // An output whose on-screen window draws the capture needs frames at the rate that window can show
-    // them, which for a physical display is the mode the OS is running it at. FreeShow has no frame-rate
-    // setting for a display output, so there is nothing configured to prefer over it.
+    // a window drawing the capture needs frames at the rate it can show them: its display's OS mode
+    // (FreeShow has no frame-rate setting for a display output)
     static presentFps(id: string): number {
         if (!OutputPresenter.isPresenting(id)) return 0
         const bounds = OutputHelper.getOutput(id)?.intendedBounds
@@ -998,8 +984,7 @@ export class OutputLifecycle {
                 if (!targets.some((t) => t.width === sw && t.height === sh && t.format === 3)) targets.push({ width: sw, height: sh, format: 3 })
                 stageStream = { width: sw, height: sh, quality: stageReq.quality, intervalMs: stageReq.intervalMs }
             }
-            // OutputShow clients take raw RGBA, which the GPU produces directly, so main stops reading the
-            // frame back and swapping its channels once per frame per viewer.
+            // OutputShow clients take raw RGBA, which the GPU produces directly
             const serverReq = CaptureHelper.Transmitter.serverStreamRequest(id)
             let serverStream: { width: number; height: number; intervalMs: number } | null = null
             if (serverReq && width && height) {
@@ -1191,8 +1176,7 @@ export class OutputLifecycle {
             const anyPresenting = members.some((m) => OutputPresenter.isPresenting(m))
             const canOffMain = groupInfo.eligible && (offMainIds.length > 0 || groupInfo.needsScaled || anyPresenting)
             if (canOffMain) {
-                // the worker now owns delivery for this frame: drop anything main was still holding, or the
-                // send timer keeps re-transmitting a stale frame alongside the worker's fresh one
+                // the worker owns delivery now; anything main still holds would be re-sent stale beside it
                 lastRaw = null
                 lastCpuImage = null
                 OutputLifecycle.noteFrameSize(id, width * height)
@@ -1284,9 +1268,7 @@ export class OutputLifecycle {
     private static startOsrSendTimer(window: BrowserWindow, id: string, emit: () => void) {
         let sendTimer: NodeJS.Timeout
         const tick = () => {
-            // While the worker owns delivery there is nothing for this timer to send: main holds no frame,
-            // and every consumer already has one. Emitting anyway walked the channel list once per tick per
-            // output for nothing. It resumes on its own if the output ever falls back to the main path.
+            // nothing to send while the worker owns delivery; resumes if the output falls back to main.
             // transmitFrame no-ops until the output's capture channels are set up, and throttles each consumer
             if (!window.isDestroyed() && !OutputLifecycle.isOffMainActive(id)) emit()
             // re-read the interval each tick so framerate changes (e.g. NDI connect) take effect

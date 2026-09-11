@@ -19,8 +19,8 @@ export function packStreamFrame(data: Buffer, width: number, height: number, str
 }
 
 // Nearest-neighbour shrink to RGBA for the app window's preview, converting only the sampled pixels.
-// The addon does this natively when it is available; the loop below is the reference it was built to
-// match byte for byte, and the fallback for a machine where the module cannot load.
+// The addon does this natively when available; the loop below is the reference it matches byte for
+// byte, and the fallback where the module cannot load.
 const NATIVE_FORMAT: { [format in StreamFrameFormat]: number } = { bgra: 0, uyvy: 1, rgba: 3 }
 let previewNative: any
 function loadPreviewNative() {
