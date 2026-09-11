@@ -586,7 +586,7 @@ export class OutputLifecycle {
     private static rendererTargetFps(id: string): number {
         let fps = 0
         for (const m of RenderGroups.members(id)) {
-            fps = Math.max(fps, this.presentFps(m))
+            fps = Math.max(fps, this.presentFps(m), CaptureHelper.previewFps(m))
             const mo = OutputHelper.getOutput(m)
             if (mo?.captureOptions) fps = Math.max(fps, CaptureHelper.getMaxActiveFramerate(mo.captureOptions.framerates || {}, mo.captureOptions.options || {}))
         }
