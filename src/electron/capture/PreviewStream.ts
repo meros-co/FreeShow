@@ -10,10 +10,15 @@ export class PreviewStream {
     // widest pixel width any subscriber of an output currently draws its preview at (0 = unknown yet)
     private static widths: { [outputId: string]: { [subscriber: string]: number } } = {}
 
+    // set by OutputLifecycle: a subscriber arriving or leaving changes the rate the render must run at, and
+    // nothing else re-applies it until a receiver connects or disconnects
+    static onSubscribersChanged: ((outputId: string) => void) | null = null
+
     static subscribe(outputId: string, subscriber = "", width = 0) {
         this.refs[outputId] = (this.refs[outputId] || 0) + 1
         this.setWidth(outputId, subscriber, width)
         this.ensurePort()
+        this.onSubscribersChanged?.(outputId)
     }
 
     static unsubscribe(outputId: string, subscriber = "") {
@@ -24,6 +29,7 @@ export class PreviewStream {
             delete this.widths[outputId][subscriber]
             if (!Object.keys(this.widths[outputId]).length) delete this.widths[outputId]
         }
+        this.onSubscribersChanged?.(outputId)
     }
 
     // a subscriber's preview element was (re)sized: the frame it is sent need be no wider than that

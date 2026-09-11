@@ -5,7 +5,6 @@ import { OmtSender } from "../omt/OmtSender"
 import { ruleViolation } from "../utils/ruleCheck"
 import { OutputHelper } from "../output/OutputHelper"
 import { RenderGroups } from "../output/helpers/RenderGroups"
-import { PreviewStream } from "./PreviewStream"
 import type { CaptureOptions } from "./CaptureOptions"
 import { CaptureLifecycle } from "./helpers/CaptureLifecycle"
 import { CaptureTransmitter } from "./helpers/CaptureTransmitter"
@@ -36,12 +35,7 @@ export class CaptureHelper {
         return configured > 0 ? configured : this.framerates.connected
     }
 
-    // A window previewing this output is watching it, so the render must keep up with what it draws even
-    // with no receiver connected. Without this the unconnected gate idles the render to 1fps and the
-    // operator's own preview goes to single digits.
-    static previewFps(id: string): number {
-        return PreviewStream.hasSubscribers(id) ? this.configuredFramerate(id) : 0
-    }
+
 
     // the rate each consumer starts at, so callers never restate one as a literal
     static defaultFramerates(): { [key: string]: number } {
@@ -128,7 +122,7 @@ export class CaptureHelper {
 
         let fps = 0
         for (const m of RenderGroups.members(rendererId)) {
-            fps = Math.max(fps, OutputHelper.Lifecycle.presentFps(m), this.previewFps(m))
+            fps = Math.max(fps, OutputHelper.Lifecycle.presentFps(m), OutputHelper.Lifecycle.previewFps(m))
             const mo = OutputHelper.getOutput(m)
             if (mo?.captureOptions) fps = Math.max(fps, this.getMaxActiveFramerate(mo.captureOptions.framerates || {}, mo.captureOptions.options || {}))
         }

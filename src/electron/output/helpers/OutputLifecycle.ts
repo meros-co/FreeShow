@@ -20,6 +20,7 @@ import { OutputHelper } from "../OutputHelper"
 import { setOutputAlwaysOnTop } from "./OutputAlwaysOnTop"
 import { OutputPresenter } from "./OutputPresenter"
 import { OutputVisibility } from "./OutputVisibility"
+import { PreviewStream } from "../../capture/PreviewStream"
 import { RenderGroups } from "./RenderGroups"
 
 // Tracks timing stages for off-main GPU readback and transmission (in ms)
@@ -48,6 +49,7 @@ export class OutputLifecycle {
 
     static initListeners() {
         RenderGroups.onChanged = () => toApp(OUTPUT, { channel: "RENDER_GROUPS", data: RenderGroups.snapshot() })
+        this.watchPreviewSubscribers()
 
         screen.on("display-metrics-changed", () => {
             setTimeout(() => this.restoreAllOutputBounds(), 500)
@@ -207,6 +209,7 @@ export class OutputLifecycle {
         this.updateWindowConstraints(id)
         this.fitRendererToGroup(rendererId)
         OutputPresenter.start(id, window)
+        CaptureHelper.updateRenderRate(RenderGroups.rendererOf(id))
 
         this.pendingCaptureStart[id] = setTimeout(() => {
             delete this.pendingCaptureStart[id]
@@ -368,6 +371,7 @@ export class OutputLifecycle {
         output.osr = true
         // the surface is now the only render of this content: the on-screen window draws the capture
         OutputPresenter.start(id, output.window)
+        CaptureHelper.updateRenderRate(RenderGroups.rendererOf(id))
         return window
     }
 
@@ -583,10 +587,21 @@ export class OutputLifecycle {
         return this.OSR_RENDER_FPS
     }
 
+    // A window previewing this output is watching it, so the render must keep up with what it draws even
+    // with no receiver connected: the per-channel rates drop to the unconnected gate, which would idle the
+    // render to 1fps while the operator is looking at it.
+    static watchPreviewSubscribers() {
+        PreviewStream.onSubscribersChanged = (outputId) => CaptureHelper.updateRenderRate(RenderGroups.rendererOf(outputId))
+    }
+
+    static previewFps(id: string): number {
+        return PreviewStream.hasSubscribers(id) ? CaptureHelper.configuredFramerate(id) : 0
+    }
+
     private static rendererTargetFps(id: string): number {
         let fps = 0
         for (const m of RenderGroups.members(id)) {
-            fps = Math.max(fps, this.presentFps(m), CaptureHelper.previewFps(m))
+            fps = Math.max(fps, this.presentFps(m), this.previewFps(m))
             const mo = OutputHelper.getOutput(m)
             if (mo?.captureOptions) fps = Math.max(fps, CaptureHelper.getMaxActiveFramerate(mo.captureOptions.framerates || {}, mo.captureOptions.options || {}))
         }
