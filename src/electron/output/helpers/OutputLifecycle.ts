@@ -441,8 +441,8 @@ export class OutputLifecycle {
         if (this.useSharedTextureCapture()) this.attachOsrSharedTexture(window, id, addon)
         else this.attachOsrCpu(window, id)
 
-        // Linux begin-frame drive; CaptureHelper.updateRenderRate re-drives it when the rate changes
-        if (process.platform === "linux") {
+        // begin-frame drive; CaptureHelper.updateRenderRate re-drives it when the rate changes
+        if (this.needsPaintDrive()) {
             window.on("closed", () => this.stopOsrPaintDrive(id))
             this.updateOsrPaintDrive(window, id, this.OSR_RENDER_FPS)
         }
@@ -459,7 +459,7 @@ export class OutputLifecycle {
     private static readonly DRIVE_TIMEOUT_INTERVALS = 4
 
     private static noteOsrPaint(id: string) {
-        if (process.platform !== "linux") return
+        if (!this.needsPaintDrive()) return
         const now = Date.now()
         const drive = this.osrPaintDrive.get(id)
         const invalidatedAt = this.lastOsrInvalidateAt.get(id)
@@ -476,8 +476,16 @@ export class OutputLifecycle {
         return n
     }
 
+    // Offscreen windows only paint when something marks them dirty. With a shared texture the compositor
+    // drives that itself, but the CPU path does not: measured on Windows with hardware acceleration off,
+    // a playing 4K video produced 0-2 paints a second while the send timer re-emitted one stale frame 30
+    // times a second. Linux needs it in both modes, having no reliable vsync for offscreen windows.
+    private static needsPaintDrive() {
+        return process.platform === "linux" || !this.useSharedTextureCapture()
+    }
+
     static updateOsrPaintDrive(window: BrowserWindow, id: string, fps: number) {
-        if (process.platform !== "linux") return
+        if (!this.needsPaintDrive()) return
         const rate = Math.max(1, Math.round(fps))
         const existing = this.osrPaintDrive.get(id)
         if (existing?.fps === rate) return
@@ -1269,13 +1277,31 @@ export class OutputLifecycle {
     // CPU fallback path: the paint event delivers a NativeImage directly.
     private static attachOsrCpu(window: BrowserWindow, id: string) {
         let lastImage: Electron.NativeImage | null = null
+        let paints = 0
+        let empty = 0
+        let emitted = 0
         window.webContents.on("paint", (_e: unknown, _dirty: unknown, image: Electron.NativeImage) => {
             OutputLifecycle.noteOsrPaint(id) // linux begin-frame drive yields to natural paints
+            paints++
+            if (!image || image.isEmpty()) {
+                empty++
+                return
+            }
             lastImage = image
         })
         this.startOsrSendTimer(window, id, () => {
-            if (lastImage) CaptureHelper.Transmitter.transmitFrame(id, lastImage)
+            if (!lastImage) return
+            emitted++
+            CaptureHelper.Transmitter.transmitFrame(id, lastImage)
         })
+        // The CPU path had no telemetry, so an output that never painted looked the same from outside as
+        // one whose frames were being dropped later: both are a black consumer and silence in the log.
+        if (!process.env.FS_CAP_STATS) return
+        const statsTimer = setInterval(() => {
+            console.info(`[CPU-STATS ${id}] paints=${paints} empty=${empty} emitted=${emitted} invalidates=${OutputLifecycle.readOsrInvalidatesIssued(id)} haveFrame=${lastImage ? "yes" : "NO"}`)
+            paints = empty = emitted = 0
+        }, 1000)
+        window.on("closed", () => clearInterval(statsTimer))
     }
 
     // emit the latest frame at the output's configured framerate, decoupling the send rate from the
