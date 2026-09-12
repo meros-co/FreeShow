@@ -538,10 +538,16 @@ export class OutputLifecycle {
     // Shared-texture offscreen capture needs the readback addon AND a GPU that Chromium is actually
     // compositing with. A machine without a usable GPU driver (software compositing) gets CPU-bitmap
     // offscreen capture, the same as when the user disables acceleration.
+    // Set when an offscreen window in shared-texture mode never delivers a paint. Chromium reports
+    // gpu_compositing "enabled" on a machine whose GL is software, and such a window is then asked for
+    // textures that cannot be produced: it paints NOTHING, so every consumer of it is black. One way,
+    // process-wide, and never set again once any paint has arrived.
+    private static sharedTextureDemoted = false
+
     private static captureModeLogged = false
     private static useSharedTextureCapture(): boolean {
         const addon = !!this.getOsrCaptureAddon()
-        const gpu = gpuCompositingAvailable()
+        const gpu = gpuCompositingAvailable() && !this.sharedTextureDemoted
         const shared = addon && gpu
         if (!this.captureModeLogged) {
             this.captureModeLogged = true
@@ -778,6 +784,32 @@ export class OutputLifecycle {
 
     static releaseOsrCaptureTextures(id: string) {
         this.osrTextureCleanup[id]?.()
+    }
+
+    // A machine that cannot produce shared textures paints WITHOUT one and then stops painting at all, so
+    // the capture is left re-sending that first blank frame for ever: a black output with no error
+    // anywhere. An idle output produces no textures either, so absence alone proves nothing - what
+    // distinguishes the two is a paint that arrived carrying no texture while none has ever arrived with
+    // one. The whole process then moves to the CPU path, which the same machine drives perfectly well.
+    private static readonly NO_TEXTURE_FRAMES = 90
+
+    private static watchForLostTextures(id: string, state: () => { sawTexture: boolean; sawTexturelessPaint: boolean }) {
+        if (this.sharedTextureDemoted) return
+        const deadline = this.getOsrTargetInterval(id) * this.NO_TEXTURE_FRAMES
+        const timer = setInterval(() => {
+            const { sawTexture, sawTexturelessPaint } = state()
+            if (this.sharedTextureDemoted || sawTexture || !OutputHelper.getOutput(id)) {
+                clearInterval(timer)
+                return
+            }
+            if (!sawTexturelessPaint) return // nothing has painted yet: idle, not broken
+            clearInterval(timer)
+            this.sharedTextureDemoted = true
+            this.captureModeLogged = false
+            console.warn(`[OSR] paints carry no shared texture and none has arrived in ${Math.round(deadline)}ms: rebuilding outputs on the CPU path`)
+            toApp(OUTPUT, { channel: "RESTART", data: {} })
+        }, deadline)
+        timer.unref?.()
     }
 
     private static attachOsrSharedTexture(window: BrowserWindow, id: string, addon: any) {
@@ -1163,11 +1195,14 @@ export class OutputLifecycle {
                 }
             }
         })
+        let sawTexture = false
+        let sawTexturelessPaint = false
         const onPaintImpl = (event: any, image: Electron.NativeImage) => {
             OutputLifecycle.noteOsrPaint(id)
             const tex = event?.texture
             const info = tex?.textureInfo
             if (!info) {
+                sawTexturelessPaint = true
                 if (image && !image.isEmpty()) {
                     if (!cpuFallback) {
                         cpuFallback = true
@@ -1192,6 +1227,7 @@ export class OutputLifecycle {
                 lastPaintTime = nowP
             }
 
+            sawTexture = true
             const width = info.codedSize.width
             const height = info.codedSize.height
             const source = process.platform === "linux" ? { planes: info.planes, modifier: info.modifier } : info.sharedTextureHandle
@@ -1244,6 +1280,7 @@ export class OutputLifecycle {
                 })
         }
         OutputLifecycle.sharedPaintImpls.set(id, onPaintImpl)
+        OutputLifecycle.watchForLostTextures(id, () => ({ sawTexture, sawTexturelessPaint }))
 
         this.startOsrSendTimer(window, id, () => {
             if (lastRaw) CaptureHelper.Transmitter.transmitFrame(id, null, undefined, lastRaw)

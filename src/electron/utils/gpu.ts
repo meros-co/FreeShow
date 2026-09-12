@@ -139,29 +139,16 @@ function isHardware(status: string | undefined): boolean {
 // Chromium's feature status at app-ready is a placeholder (software everywhere) until the GPU
 // process has reported; getGPUInfo resolves at that point, on machines with and without a GPU.
 // Anything that decides based on the GPU state awaits this first.
-// Chromium reports gpu_compositing "enabled" whenever it has a working GL context, which it has under a
-// software rasteriser too - so the feature status alone cannot tell a real GPU from llvmpipe. The
-// renderer string can, and a machine without drivers must not be handed the GPU texture paths.
-let softwareRendered = false
-const SOFTWARE_RENDERERS = /llvmpipe|softpipe|swiftshader|lavapipe|software rasterizer/i
-
 export const gpuStateSettled: Promise<void> = app
     .whenReady()
     .then(() => app.getGPUInfo("basic"))
     .then(
-        (info: any) => {
-            const aux = info?.auxAttributes || {}
-            const renderer = String(aux.glRenderer || "")
-            softwareRendered = !!aux.softwareRendering || SOFTWARE_RENDERERS.test(renderer)
-            if (softwareRendered) console.info(`[GPU] rendering in software (${renderer || "unknown renderer"}): shared-texture capture stays off`)
-            return undefined
-        },
+        () => undefined,
         () => undefined
     )
 
 export function gpuCompositingAvailable(): boolean {
     if (hardwareAccelerationDisabled) return false
-    if (softwareRendered) return false
     try {
         const status = app.getGPUFeatureStatus() as unknown as Record<string, string>
         return isHardware(status.gpu_compositing)
