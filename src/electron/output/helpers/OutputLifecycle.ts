@@ -674,7 +674,12 @@ export class OutputLifecycle {
     private static videoLayerRunning = new Set<string>()
     private static videoLayerHooked = false
 
+    // FS_VIDEO_LAYER=0 keeps the page drawing a live input itself instead of the worker compositing it,
+    // so a black output can be told apart from a black composite
+    static videoLayerDisabled = process.env.FS_VIDEO_LAYER === "0"
+
     static requestVideoLayer(id: string, wanted: boolean) {
+        if (this.videoLayerDisabled) return
         this.hookVideoLayer()
         const renderer = RenderGroups.rendererOf(id) || id
         if (wanted === this.videoLayerWanted.has(renderer)) return
