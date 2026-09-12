@@ -303,17 +303,20 @@ export class OutputLifecycle {
     // requested size exactly equals a monitor's pixel size, so WMs don't treat it as fullscreen. That
     // makes an offscreen capture window for a 1920x1080 output on a 1920x1080 screen render 1919x1079
     // — an odd width the NDI/OMT (VMX) encoder refuses, so the receiver connects but gets no video.
-    // An offscreen window is never WM-managed, so nudge its requested size off the exact display match.
-    // No-op off Linux and whenever the size already differs from every display.
+    // An offscreen window is never WM-managed, so nudge its requested size off the exact display match,
+    // keeping the width even. No-op off Linux and whenever the size already differs from every display.
     private static avoidLinuxDisplaySizeShrink(options: BrowserWindowConstructorOptions) {
         if (process.platform !== "linux" || !options.width || !options.height) return
         const matchesDisplay = screen.getAllDisplays().some((d) => {
             const sf = d.scaleFactor || 1
             return Math.round(d.size.width * sf) === options.width && Math.round(d.size.height * sf) === options.height
         })
+        // by TWO, not one: the packed formats pair pixels, so an odd width is refused outright (and with a
+        // video layer there is no CPU fallback to refuse to, so the whole readback fails and the output is
+        // black). Nudging by one traded the 1919 this avoids for a 1921 that fails the same way.
         if (matchesDisplay) {
-            options.width! += 1
-            options.height! += 1
+            options.width! += 2
+            options.height! += 2
         }
     }
 
