@@ -52,6 +52,15 @@ export const isLinux: boolean = process.platform === "linux"
 // Chromium command-line switches must precede app "ready" (they configure the GPU process launch)
 applyCommandLineSwitches()
 
+// Whoever is reading our output may stop (a shell pipeline closing, a terminal going away). A write to a
+// closed stream raises EPIPE, and an unhandled one takes the whole app down mid-service - losing the
+// outputs over a log line nobody was reading.
+for (const stream of [process.stdout, process.stderr]) {
+    stream.on("error", (err: NodeJS.ErrnoException) => {
+        if (err?.code !== "EPIPE") throw err
+    })
+}
+
 // graphics device selection (Settings > Other): must run before "ready" (command-line switches
 // precede GPU process launch); a change requires a restart, like the hardware-acceleration toggle
 applyGraphicsDeviceSelection()
