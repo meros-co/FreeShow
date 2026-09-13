@@ -459,6 +459,7 @@ export class OutputLifecycle {
     private static lastOsrInvalidateAt = new Map<string, number>()
     private static osrInvalidateInFlight = new Map<string, boolean>()
     private static osrInvalidatesIssued = new Map<string, number>()
+    private static osrInvalidatesTotal = new Map<string, number>()
     private static readonly DRIVE_TIMEOUT_INTERVALS = 4
 
     private static noteOsrPaint(id: string) {
@@ -513,6 +514,7 @@ export class OutputLifecycle {
                 this.lastOsrInvalidateAt.set(id, now)
                 this.osrInvalidateInFlight.set(id, true)
                 this.osrInvalidatesIssued.set(id, (this.osrInvalidatesIssued.get(id) || 0) + 1)
+                this.osrInvalidatesTotal.set(id, (this.osrInvalidatesTotal.get(id) || 0) + 1)
                 wc.invalidate()
             } catch {
                 // window tearing down
@@ -529,6 +531,7 @@ export class OutputLifecycle {
         this.lastOsrInvalidateAt.delete(id)
         this.osrInvalidateInFlight.delete(id)
         this.osrInvalidatesIssued.delete(id)
+        this.osrInvalidatesTotal.delete(id)
     }
 
     static isHardwareAccelerationDisabled(): boolean {
@@ -786,27 +789,40 @@ export class OutputLifecycle {
         this.osrTextureCleanup[id]?.()
     }
 
-    // A machine that cannot produce shared textures paints WITHOUT one and then stops painting at all, so
-    // the capture is left re-sending that first blank frame for ever: a black output with no error
-    // anywhere. An idle output produces no textures either, so absence alone proves nothing - what
-    // distinguishes the two is a paint that arrived carrying no texture while none has ever arrived with
-    // one. The whole process then moves to the CPU path, which the same machine drives perfectly well.
+    // Shared-texture capture that a GPU cannot actually drive ends in a black output that logs nothing:
+    // either it paints WITHOUT a texture and then stops, or it stops painting at all. The begin-frame
+    // drive is what makes the second detectable - it invalidates the window precisely to force a paint,
+    // and on a working machine one follows every time, idle or not (measured: 30 invalidates, 30 paints
+    // on a static page). Invalidates going out with NOTHING coming back is the compositor refusing, and
+    // the whole process is then better off on the CPU path, which such a machine drives perfectly well.
     private static readonly NO_TEXTURE_FRAMES = 90
 
-    private static watchForLostTextures(id: string, state: () => { sawTexture: boolean; sawTexturelessPaint: boolean }) {
+    private static watchForDeadCapture(id: string, state: () => { sawTexture: boolean; sawTexturelessPaint: boolean; paints: number }) {
         if (this.sharedTextureDemoted) return
         const deadline = this.getOsrTargetInterval(id) * this.NO_TEXTURE_FRAMES
+        let lastPaints = 0
+        let lastInvalidates = 0
         const timer = setInterval(() => {
-            const { sawTexture, sawTexturelessPaint } = state()
-            if (this.sharedTextureDemoted || sawTexture || !OutputHelper.getOutput(id)) {
+            if (this.sharedTextureDemoted || !OutputHelper.getOutput(id)) {
                 clearInterval(timer)
                 return
             }
-            if (!sawTexturelessPaint) return // nothing has painted yet: idle, not broken
+            const { sawTexture, sawTexturelessPaint, paints } = state()
+            const invalidates = this.osrInvalidatesTotal.get(id) || 0
+            const paintsNow = paints - lastPaints
+            const invalidatesNow = invalidates - lastInvalidates
+            lastPaints = paints
+            lastInvalidates = invalidates
+
+            const neverATexture = sawTexturelessPaint && !sawTexture
+            const askedAndGotNothing = invalidatesNow > 0 && paintsNow === 0
+            if (!neverATexture && !askedAndGotNothing) return
+
             clearInterval(timer)
             this.sharedTextureDemoted = true
             this.captureModeLogged = false
-            console.warn(`[OSR] paints carry no shared texture and none has arrived in ${Math.round(deadline)}ms: rebuilding outputs on the CPU path`)
+            const why = neverATexture ? "paints carry no shared texture" : `${invalidatesNow} paints requested, none delivered`
+            console.warn(`[OSR] shared-texture capture is not delivering (${why}): rebuilding outputs on the CPU path`)
             toApp(OUTPUT, { channel: "RESTART", data: {} })
         }, deadline)
         timer.unref?.()
@@ -1197,7 +1213,9 @@ export class OutputLifecycle {
         })
         let sawTexture = false
         let sawTexturelessPaint = false
+        let paintCount = 0
         const onPaintImpl = (event: any, image: Electron.NativeImage) => {
+            paintCount++
             OutputLifecycle.noteOsrPaint(id)
             const tex = event?.texture
             const info = tex?.textureInfo
@@ -1280,7 +1298,7 @@ export class OutputLifecycle {
                 })
         }
         OutputLifecycle.sharedPaintImpls.set(id, onPaintImpl)
-        OutputLifecycle.watchForLostTextures(id, () => ({ sawTexture, sawTexturelessPaint }))
+        OutputLifecycle.watchForDeadCapture(id, () => ({ sawTexture, sawTexturelessPaint, paints: paintCount }))
 
         this.startOsrSendTimer(window, id, () => {
             if (lastRaw) CaptureHelper.Transmitter.transmitFrame(id, null, undefined, lastRaw)
