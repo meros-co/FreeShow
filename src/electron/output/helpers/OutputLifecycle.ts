@@ -359,10 +359,16 @@ export class OutputLifecycle {
             const output = OutputHelper.getOutput(id)
             if (!output || (output as any).follower) continue
             if (output.captureWindow) {
+                // Restart the capture rather than swapping the window: on this path there may be no
+                // surface at all (an offscreen window is no use where it cannot render video), and the
+                // capture then has to run against the output's own window - a different loop entirely.
+                // Leaving the old options in place left the output with no capture running at all.
+                const toggles = { ...(output.captureOptions?.options || {}) }
                 this.destroyCaptureSurface(id)
-                const surface = this.createCaptureSurface(id)
-                if (surface && output.captureOptions) output.captureOptions.window = surface
-                console.info(`[OSR ${id}] capture surface rebuilt on the CPU path`)
+                CaptureHelper.Lifecycle.stopCapture(id)
+                CaptureHelper.Lifecycle.startCapture(id, toggles)
+                const mode = OutputHelper.getOutput(id)?.captureWindow ? "a new capture surface" : "its own window"
+                console.info(`[OSR ${id}] capture restarted on the CPU path, from ${mode}`)
             } else if (output.osr) {
                 needsAppRestart = true
             }
