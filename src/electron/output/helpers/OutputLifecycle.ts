@@ -348,6 +348,28 @@ export class OutputLifecycle {
     // An on-screen window can only be captured with capturePage on main, so a captured displayed output
     // renders offscreen as well and the capture reads that. Only while a capture is running, and only
     // when no other output already renders this content (that case presents instead).
+    // Offscreen mode is fixed when a window is created, so moving to the CPU path means building new
+    // windows. A capture SURFACE belongs to this process and is replaced here directly; an output whose
+    // own window is the offscreen one has to be recreated by the app, which owns its config. Doing the
+    // surfaces here matters: the app round-trip is the part that can fail to come back, and then the
+    // demotion is announced but never happens.
+    private static rebuildAfterDemotion() {
+        let needsAppRestart = false
+        for (const id of OutputHelper.getKeys()) {
+            const output = OutputHelper.getOutput(id)
+            if (!output || (output as any).follower) continue
+            if (output.captureWindow) {
+                this.destroyCaptureSurface(id)
+                const surface = this.createCaptureSurface(id)
+                if (surface && output.captureOptions) output.captureOptions.window = surface
+                console.info(`[OSR ${id}] capture surface rebuilt on the CPU path`)
+            } else if (output.osr) {
+                needsAppRestart = true
+            }
+        }
+        if (needsAppRestart) toApp(OUTPUT, { channel: "RESTART", data: {} })
+    }
+
     // A presenting window renders nothing and draws the capture instead, and those frames come from the
     // capture WORKER - which only runs on the shared-texture path. On the CPU path nothing would ever
     // arrive, so the window must keep rendering its own content or it is simply black.
@@ -833,7 +855,7 @@ export class OutputLifecycle {
             this.sharedTextureDemoted = true
             this.captureModeLogged = false
             console.warn(`[OSR] ${texturelessNow} paints for ${invalidatesNow} requested, none carrying a shared texture: rebuilding outputs on the CPU path`)
-            toApp(OUTPUT, { channel: "RESTART", data: {} })
+            this.rebuildAfterDemotion()
         }, deadline)
         timer.unref?.()
     }
