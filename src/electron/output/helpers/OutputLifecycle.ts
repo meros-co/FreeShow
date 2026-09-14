@@ -380,6 +380,12 @@ export class OutputLifecycle {
     static createCaptureSurface(id: string): BrowserWindow | null {
         const output = OutputHelper.getOutput(id)
         if (!output || (output as any).follower || output.presenter || output.osr) return null
+        // Only worth doing when the capture is a shared texture. Without one this window gains nothing -
+        // the frame is read back on the main thread either way - and it costs correctness: a displayed
+        // output used to be captured from the window the user is looking at, which renders whatever the
+        // machine can render. An offscreen window is not that window, and on a machine without GPU
+        // drivers it does not paint video at all, so the capture is black while the display looks right.
+        if (!this.useSharedTextureCapture()) return null
 
         const existing = output.captureWindow
         if (existing && !existing.isDestroyed()) return existing
