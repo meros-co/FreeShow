@@ -789,40 +789,43 @@ export class OutputLifecycle {
         this.osrTextureCleanup[id]?.()
     }
 
-    // Shared-texture capture that a GPU cannot actually drive ends in a black output that logs nothing:
-    // either it paints WITHOUT a texture and then stops, or it stops painting at all. The begin-frame
-    // drive is what makes the second detectable - it invalidates the window precisely to force a paint,
-    // and on a working machine one follows every time, idle or not (measured: 30 invalidates, 30 paints
-    // on a static page). Invalidates going out with NOTHING coming back is the compositor refusing, and
-    // the whole process is then better off on the CPU path, which such a machine drives perfectly well.
-    private static readonly NO_TEXTURE_FRAMES = 90
+    // Shared-texture capture a GPU cannot actually drive ends in a black output that logs nothing: paints
+    // arrive carrying no texture, or stop carrying one after the first few. Neither is visible in a
+    // latched "did a texture ever arrive", because on such a machine the first frames often DO carry one.
+    //
+    // The begin-frame drive is what makes it decidable. It invalidates the window precisely to force a
+    // paint, so within one sampling window: invalidates went out, paints came back, and NONE of them
+    // carried a texture. On a working machine a forced paint carries one, idle or not. An idle machine
+    // that simply is not painting is not demoted, because paints must be arriving for this to fire.
+    private static readonly DEAD_CAPTURE_FRAMES = 90
 
-    private static watchForDeadCapture(id: string, state: () => { sawTexture: boolean; sawTexturelessPaint: boolean; paints: number }) {
+    private static watchForDeadCapture(id: string, state: () => { textured: number; textureless: number }) {
         if (this.sharedTextureDemoted) return
-        const deadline = this.getOsrTargetInterval(id) * this.NO_TEXTURE_FRAMES
-        let lastPaints = 0
+        const deadline = this.getOsrTargetInterval(id) * this.DEAD_CAPTURE_FRAMES
+        let lastTextured = 0
+        let lastTextureless = 0
         let lastInvalidates = 0
         const timer = setInterval(() => {
             if (this.sharedTextureDemoted || !OutputHelper.getOutput(id)) {
                 clearInterval(timer)
                 return
             }
-            const { sawTexture, sawTexturelessPaint, paints } = state()
+            const { textured, textureless } = state()
             const invalidates = this.osrInvalidatesTotal.get(id) || 0
-            const paintsNow = paints - lastPaints
+            const texturedNow = textured - lastTextured
+            const texturelessNow = textureless - lastTextureless
             const invalidatesNow = invalidates - lastInvalidates
-            lastPaints = paints
+            lastTextured = textured
+            lastTextureless = textureless
             lastInvalidates = invalidates
 
-            const neverATexture = sawTexturelessPaint && !sawTexture
-            const askedAndGotNothing = invalidatesNow > 0 && paintsNow === 0
-            if (!neverATexture && !askedAndGotNothing) return
+            if (texturedNow > 0) return // it is delivering
+            if (invalidatesNow === 0 || texturelessNow === 0) return // nothing was asked, or nothing painted
 
             clearInterval(timer)
             this.sharedTextureDemoted = true
             this.captureModeLogged = false
-            const why = neverATexture ? "paints carry no shared texture" : `${invalidatesNow} paints requested, none delivered`
-            console.warn(`[OSR] shared-texture capture is not delivering (${why}): rebuilding outputs on the CPU path`)
+            console.warn(`[OSR] ${texturelessNow} paints for ${invalidatesNow} requested, none carrying a shared texture: rebuilding outputs on the CPU path`)
             toApp(OUTPUT, { channel: "RESTART", data: {} })
         }, deadline)
         timer.unref?.()
@@ -1211,16 +1214,14 @@ export class OutputLifecycle {
                 }
             }
         })
-        let sawTexture = false
-        let sawTexturelessPaint = false
-        let paintCount = 0
+        let texturedPaints = 0
+        let texturelessPaints = 0
         const onPaintImpl = (event: any, image: Electron.NativeImage) => {
-            paintCount++
             OutputLifecycle.noteOsrPaint(id)
             const tex = event?.texture
             const info = tex?.textureInfo
             if (!info) {
-                sawTexturelessPaint = true
+                texturelessPaints++
                 if (image && !image.isEmpty()) {
                     if (!cpuFallback) {
                         cpuFallback = true
@@ -1245,7 +1246,7 @@ export class OutputLifecycle {
                 lastPaintTime = nowP
             }
 
-            sawTexture = true
+            texturedPaints++
             const width = info.codedSize.width
             const height = info.codedSize.height
             const source = process.platform === "linux" ? { planes: info.planes, modifier: info.modifier } : info.sharedTextureHandle
@@ -1298,7 +1299,7 @@ export class OutputLifecycle {
                 })
         }
         OutputLifecycle.sharedPaintImpls.set(id, onPaintImpl)
-        OutputLifecycle.watchForDeadCapture(id, () => ({ sawTexture, sawTexturelessPaint, paints: paintCount }))
+        OutputLifecycle.watchForDeadCapture(id, () => ({ textured: texturedPaints, textureless: texturelessPaints }))
 
         this.startOsrSendTimer(window, id, () => {
             if (lastRaw) CaptureHelper.Transmitter.transmitFrame(id, null, undefined, lastRaw)
