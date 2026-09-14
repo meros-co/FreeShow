@@ -208,7 +208,7 @@ export class OutputLifecycle {
         OutputHelper.Bounds.updateBounds({ id, bounds })
         this.updateWindowConstraints(id)
         this.fitRendererToGroup(rendererId)
-        OutputPresenter.start(id, window)
+        if (this.presenterCanDraw()) OutputPresenter.start(id, window)
         CaptureHelper.updateRenderRate(RenderGroups.rendererOf(id))
 
         this.pendingCaptureStart[id] = setTimeout(() => {
@@ -348,6 +348,13 @@ export class OutputLifecycle {
     // An on-screen window can only be captured with capturePage on main, so a captured displayed output
     // renders offscreen as well and the capture reads that. Only while a capture is running, and only
     // when no other output already renders this content (that case presents instead).
+    // A presenting window renders nothing and draws the capture instead, and those frames come from the
+    // capture WORKER - which only runs on the shared-texture path. On the CPU path nothing would ever
+    // arrive, so the window must keep rendering its own content or it is simply black.
+    private static presenterCanDraw(): boolean {
+        return this.useSharedTextureCapture()
+    }
+
     static createCaptureSurface(id: string): BrowserWindow | null {
         const output = OutputHelper.getOutput(id)
         if (!output || (output as any).follower || output.presenter || output.osr) return null
@@ -373,7 +380,7 @@ export class OutputLifecycle {
         output.captureWindow = window
         output.osr = true
         // the surface is now the only render of this content: the on-screen window draws the capture
-        OutputPresenter.start(id, output.window)
+        if (this.presenterCanDraw()) OutputPresenter.start(id, output.window)
         CaptureHelper.updateRenderRate(RenderGroups.rendererOf(id))
         return window
     }
