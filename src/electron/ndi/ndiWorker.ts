@@ -1391,6 +1391,33 @@ port.on("message", (msg: any) => {
         case "previewReset":
             if (previewServer) for (const m of Object.keys(previewServer.targets())) previewServer.drop(m)
             break
+        case "cpuFrame": {
+            // A frame that could not be captured as a shared texture (no GPU, or a machine whose offscreen
+            // windows cannot render video). Main read it back once and handed it over; everything a
+            // consumer needs is derived here, on this thread, exactly as the GPU path derives its targets.
+            const osr = loadOsrCapture()
+            const buf = Buffer.from(msg.buffer, msg.byteOffset, msg.byteLength)
+            const { id, size, server, stage, preview } = msg
+            if (!osr || typeof osr.previewFrame !== "function") break
+            const rgbaAt = (maxWidth: number) => osr.previewFrame(buf, size.width, size.height, 0, maxWidth)
+            try {
+                if (server) {
+                    const f = rgbaAt(server.width)
+                    port.postMessage({ type: "serverFrame", id, buffer: f.data, size: { width: f.width, height: f.height } }, [f.data.buffer])
+                }
+                if (stage) {
+                    const f = rgbaAt(stage.width)
+                    encodeStageFrame(id, msg.members || [id], f.data, { width: f.width, height: f.height, quality: stage.quality, intervalMs: stage.intervalMs })
+                }
+                if (preview) {
+                    const f = rgbaAt(preview.width)
+                    previewFrames().deliver(id, "PREVIEW", id, { xres: f.width, yres: f.height, format: "rgba", data: f.data }, Date.now(), true)
+                }
+            } catch (err: any) {
+                console.error("cpu frame fan-out failed:", err?.message)
+            }
+            break
+        }
         case "presentReset":
             if (presentServer) for (const m of Object.keys(presentServer.targets())) presentServer.drop(m)
             break

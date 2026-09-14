@@ -28,8 +28,6 @@ export class CaptureTransmitter {
     private static readonly FPS_EPSILON_LOW = 1.0
 
     static channels: { [key: string]: Channel } = {}
-    // last time any channel of a capture observed changed frame content (used for idle frame rate backoff)
-    private static lastChangeTimes: { [captureId: string]: number } = {}
     private static lastStagePushTimes: { [captureId: string]: number } = {}
 
     static startTransmitting(captureId: string) {
@@ -47,8 +45,6 @@ export class CaptureTransmitter {
         if (this.channels[combinedKey]) return
 
         this.channels[combinedKey] = { key, captureId, lastFrameTime: 0 }
-        // start at full frame rate until content proves static
-        this.lastChangeTimes[captureId] = performance.now()
     }
 
     static stopChannel(captureId: string, key: string) {
@@ -60,8 +56,6 @@ export class CaptureTransmitter {
             delete this.lastStagePushTimes[captureId]
         }
 
-        const hasRemainingChannels = Object.keys(this.channels).some((k) => k.startsWith(`${captureId}-`))
-        if (!hasRemainingChannels) delete this.lastChangeTimes[captureId]
     }
 
     // Choose shared-texture readback/convert target: 0=BGRA, 1=UYVY (opaque), 2=UYVA (transparency), 3=RGBA
@@ -126,11 +120,6 @@ export class CaptureTransmitter {
         return { eligible: true, needsScaled: needsScaled && (this.previewViewersConnected() || PreviewStream.hasSubscribers()) }
     }
 
-    static getTimeSinceLastChange(captureId: string): number {
-        const lastChange = this.lastChangeTimes[captureId]
-        if (lastChange === undefined) return 0
-        return performance.now() - lastChange
-    }
 
     // buffer-consumers need only raw BGRA bytes (no NativeImage resize/toJPEG), so on the shared-texture
     // path they can take the readback buffer directly instead of a createFromBitmap -> toBitmap round-trip.
@@ -152,6 +141,16 @@ export class CaptureTransmitter {
     private static readonly HEAVY_MAIN_SHARE = 0.5
     private static readonly HEAVY_COST_SMOOTHING = 0.2
     private static heavyCostMs: { [captureId: string]: number } = {}
+    private static heavyServedByWorker: { [captureId: string]: boolean } = {}
+
+    // The two ways of serving these consumers cost wildly different amounts, and the smoothed cost is
+    // what caps the rate. Carrying a measurement across a switch throttles the cheap path to the speed of
+    // the expensive one - and then measures too rarely to ever recover.
+    private static noteHeavyMode(captureId: string, viaWorker: boolean) {
+        if (this.heavyServedByWorker[captureId] === viaWorker) return
+        this.heavyServedByWorker[captureId] = viaWorker
+        delete this.heavyCostMs[captureId]
+    }
 
     private static noteHeavyCost(captureId: string, ms: number) {
         const previous = this.heavyCostMs[captureId]
@@ -225,12 +224,27 @@ export class CaptureTransmitter {
             }
             if (firing.length === 0) return
 
+            // Consumers that need the frame resized, converted or encoded go to the worker even when the
+            // capture could not be a shared texture: main reads the frame back once and hands it over,
+            // and does no per-consumer work at all.
+            const heavy = firing.filter((c) => !this.BUFFER_CONSUMERS.has(c.key)).map((c) => c.key)
+            let servedByWorker = false
+            if (heavy.length > 0) {
+                // measured like any other main-thread frame work, so the rate cap reflects what this path
+                // actually costs (one readback) rather than what the per-consumer path used to
+                const started = performance.now()
+                servedByWorker = this.serveHeavyViaWorker(captureId, image, raw, heavy)
+                this.noteHeavyMode(captureId, servedByWorker)
+                if (servedByWorker) this.noteHeavyCost(captureId, performance.now() - started)
+            }
+
             let frameImage: NativeImage | null | undefined = undefined
             for (const channel of firing) {
                 if (raw && this.BUFFER_CONSUMERS.has(channel.key)) {
                     this.sendRawToChannel(captureId, channel.key, raw.buffer, raw.size, raw.format ?? 0)
                     continue
                 }
+                if (servedByWorker) continue
                 const started = performance.now()
                 if (frameImage === undefined) frameImage = this.buildHeavyImage(image, raw)
                 if (frameImage && !frameImage.isEmpty()) this.sendFrameToChannel(captureId, channel.key, frameImage)
@@ -369,6 +383,49 @@ export class CaptureTransmitter {
 
     // A viewer costs its area, so bandwidth is viewers x width^2; holding that constant means the width
     // falls with the square root of the viewer count.
+    // Hand ONE readback of this frame to the capture worker and let it derive every consumer's version.
+    // The readback cannot be avoided here - a frame captured from a real window exists only as a
+    // NativeImage on this thread - but it happens once, and no resize, convert or encode happens here.
+    private static serveHeavyViaWorker(captureId: string, image: NativeImage | null, raw: { buffer: Buffer; size: Size; format?: number } | undefined, keys: string[]): boolean {
+        if (!NdiSender.hasWorker()) return false
+
+        const server = keys.includes("server") ? this.serverStreamRequest(captureId) : null
+        const stage = keys.includes("stage") ? this.stageStreamRequest() : null
+        const previewWidth = PreviewStream.hasSubscribers(captureId) ? Math.max(2, PreviewStream.requestedWidth([captureId]) || this.HEAVY_IMAGE_MAX_WIDTH) : 0
+        if (!server && !stage && !previewWidth) return false
+
+        let source: Buffer
+        let size: Size
+        if (raw && (raw.format ?? 0) === 0) {
+            source = raw.buffer
+            size = raw.size
+        } else {
+            if (!image || image.isEmpty()) return false
+            ruleViolation("main-frame", "readback of a window with no shared texture")
+            source = image.toBitmap()
+            size = image.getSize()
+        }
+        if (!size.width || !size.height) return false
+
+        const copy = Buffer.from(source)
+        NdiSender.postToWorker(
+            {
+                type: "cpuFrame",
+                id: captureId,
+                members: OutputHelper.Lifecycle.groupMembers(captureId),
+                buffer: copy.buffer,
+                byteOffset: copy.byteOffset,
+                byteLength: copy.byteLength,
+                size,
+                server: server ? { width: Math.min(server.width, size.width) } : null,
+                stage: stage ? { width: Math.min(stage.width, size.width), quality: stage.quality, intervalMs: stage.intervalMs } : null,
+                preview: previewWidth ? { width: Math.min(previewWidth, size.width) } : null
+            },
+            [copy.buffer]
+        )
+        return true
+    }
+
     static serverFrameWidth(): number {
         const viewers = Math.max(1, getConnections("OUTPUT_STREAM"))
         const width = Math.round(this.HEAVY_IMAGE_MAX_WIDTH / Math.sqrt(viewers))
@@ -570,5 +627,6 @@ export class CaptureTransmitter {
             delete this.channels[key]
         }
         delete this.heavyCostMs[captureId]
+        delete this.heavyServedByWorker[captureId]
     }
 }

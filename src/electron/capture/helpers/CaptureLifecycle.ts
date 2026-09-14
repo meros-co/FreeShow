@@ -15,8 +15,6 @@ export class CaptureLifecycle {
     private static readonly MIN_DELAY_MS = 1
     private static readonly WEBRTC_START_DELAY_MS = 1000
     // reduce capture rate when output content has not changed for a while (static slide/idle)
-    private static readonly IDLE_AFTER_MS = 2000
-    private static readonly IDLE_FPS = 3
 
     private static captureLoopToken: { [key: string]: number } = {}
     private static activeCaptures: Set<string> = new Set()
@@ -181,13 +179,6 @@ export class CaptureLifecycle {
 
         // Blackmagic backpressure is the card's own buffer depth, gated per frame in BlackmagicSender;
         // canAcceptFrame skips the capture entirely while it cannot take one.
-
-        // static content - capture at a low rate until a change is detected
-        // (Blackmagic and NDI frames bypass change detection / idle backoff to maintain video stream clocks)
-        const timeSinceChange = CaptureTransmitter.getTimeSinceLastChange(id)
-        if (!options.blackmagic && !options.ndi && timeSinceChange > this.IDLE_AFTER_MS) {
-            return Math.min(baseCaptureFrameRate, this.IDLE_FPS)
-        }
 
         return baseCaptureFrameRate
     }

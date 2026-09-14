@@ -253,8 +253,13 @@ export class NdiSender {
     static captureDoneCallbacks: { [id: string]: (seq: number, tl?: { recv: number; cS: number; cE: number; fS: number; fE: number; enq: number } | null) => void } = {}
     static releaseTextureCallbacks: { [id: string]: (seq: number) => void } = {}
 
-    static postToWorker(msg: any) {
-        this.worker?.postMessage(msg)
+    static hasWorker(): boolean {
+        return !!this.getWorker()
+    }
+
+    static postToWorker(msg: any, transfer?: any[]) {
+        if (transfer) this.getWorker()?.postMessage(msg, transfer)
+        else this.worker?.postMessage(msg)
     }
 
     static captureFrameNDI(id: string, source: any, opts: CaptureFrameOpts) {
