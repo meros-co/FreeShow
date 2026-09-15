@@ -2,6 +2,7 @@
 
 <script lang="ts">
     import { onDestroy } from "svelte"
+    import { compositedOutputs } from "../drawer/live/streamLayer"
     import { uid } from "uid"
     import type { OutData } from "../../../types/Output"
     import type { Styles } from "../../../types/Settings"
@@ -298,7 +299,12 @@
     $: cropping = currentOutput.cropping || currentStyle.cropping
 
     // values
-    $: backgroundColor = currentOutput.transparent ? "transparent" : styleTemplate?.settings?.backgroundColor || currentSlide?.settings?.color || currentStyle.background || slide?.settings?.backgroundColor || "black"
+    // a composited stream (see streamLayer) is behind the page, so the background must let it through
+    // Only the captured output window itself goes transparent for the composite; the worker draws the
+    // video underneath the page there. A mirror is an ordinary copy drawn in this window, so making it
+    // transparent showed nothing, and Zoomed animates a background colour change, so it faded to black
+    // for the best part of a second every time an input was triggered.
+    $: backgroundColor = currentOutput.transparent || (!mirror && $compositedOutputs[outputId]) ? "transparent" : styleTemplate?.settings?.backgroundColor || currentSlide?.settings?.color || currentStyle.background || slide?.settings?.backgroundColor || "black"
     // background image
     $: styleBackground = currentStyle?.clearStyleBackgroundOnText && (slide || background) ? "" : currentStyle?.backgroundImage || ""
     $: styleBackgroundData = { path: styleBackground, ...($media[styleBackground] || {}), loop: true }

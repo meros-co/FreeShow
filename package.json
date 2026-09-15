@@ -18,7 +18,9 @@
     "scripts": {
         "postinstall": "electron-builder install-app-deps",
         "rebuild-opus": "electron-rebuild -f -w @discordjs/opus",
-        "rebuild-osr": "electron-rebuild -f -w osr-capture",
+        "rebuild-osr": "node scripts/native-src.cjs --sync && electron-rebuild -f --only osr-capture",
+        "sync-native": "node scripts/native-src.cjs --sync",
+        "check-native": "node scripts/native-src.cjs",
         "---DEVELOPMENT---": "",
         "start": "node scripts/start.js",
         "start:old": "npx cross-env NODE_ENV=development npm-run-all -p -r build:frontend:dev start:electron",
@@ -61,7 +63,8 @@
         "lint:electron": "eslint -c config/linting/eslint.electron.json --ext .js,.ts src/electron --fix",
         "lint:frontend": "eslint -c config/linting/eslint.frontend.json --ext .js,.ts src/frontend --fix",
         "lint:svelte": "eslint -c config/linting/eslint.svelte.js --ext .svelte src/frontend --fix",
-        "lint:styles": "npx stylelint 'src/frontend/**/*.{css,scss,svelte}' --config config/linting/.stylelintrc.json"
+        "lint:styles": "npx stylelint 'src/frontend/**/*.{css,scss,svelte}' --config config/linting/.stylelintrc.json",
+        "check-capabilities": "electron scripts/capability-check.cjs"
     },
     "devDependencies": {
         "@electron/notarize": "^2.5.0",
@@ -151,15 +154,17 @@
         "mp4box": "^0.6.5",
         "music-metadata": "^7.14.0",
         "node-machine-id": "^1.1.12",
-        "openmediatransport": "github:meros-co/openmediatransport-node#abf6c34cb69450b24de0f69ecb6aeadc0387d9e0",
+        "openmediatransport": "github:meros-co/openmediatransport-node#1eb7bb50b0c135fbb7ddbbbd858d774f630d9df4",
         "osc-js": "^2.4.1",
-        "osr-capture": "github:meros-co/osr-capture#1cbeae874891839d2d1d6b511b512d704a4eda26",
+        "osr-capture": "github:meros-co/osr-capture#e2cc94cd31bee23e7f5ddb6013a82339521de887",
         "protobufjs": "^7.5.3",
+        "sharp": "^0.35.4",
         "slideshow": "github:vassbo/slideshow#224d50f",
         "socket.io": "^4.8.1",
         "uid": "^2.0.2",
         "upath": "^2.0.1",
         "word-extractor": "^1.0.4",
+        "ws": "^8.18.0",
         "yauzl": "^3.2.0",
         "yazl": "^3.3.1"
     },

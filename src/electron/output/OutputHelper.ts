@@ -11,6 +11,7 @@ import { OutputSend } from "./helpers/OutputSend"
 import { OutputValues } from "./helpers/OutputValues"
 import { OutputVisibility } from "./helpers/OutputVisibility"
 import { RenderGroups } from "./helpers/RenderGroups"
+import { PreviewStream } from "../capture/PreviewStream"
 import type { Output as OutputData } from "./Output"
 
 export class OutputHelper {
@@ -31,7 +32,10 @@ export class OutputHelper {
             SET_VALUE: (data: { id: string; key: string; value: boolean | { key: string; value: boolean } }) => OutputHelper.Values.updateValue(data),
             TO_FRONT: (data: string) => OutputHelper.Bounds.moveToFront(data),
 
-            REQUEST_PREVIEW: (data: { id: string; previewId: string }) => CaptureHelper.Transmitter.requestPreview(data),
+            STREAM_LAYER: (data: { id: string; active: boolean }) => OutputLifecycle.requestVideoLayer(data.id, !!data.active),
+            PREVIEW_SUBSCRIBE: (data: { id: string; subscriber?: string; width?: number }) => PreviewStream.subscribe(data.id, data.subscriber, data.width),
+            PREVIEW_UNSUBSCRIBE: (data: { id: string; subscriber?: string }) => PreviewStream.unsubscribe(data.id, data.subscriber),
+            PREVIEW_SIZE: (data: { id: string; subscriber: string; width: number }) => PreviewStream.setWidth(data.id, data.subscriber, data.width),
             CAPTURE: (data: { id: string; captures: { [key: string]: boolean } }) => CaptureHelper.Lifecycle.startCapture(data.id, data.captures),
 
             IDENTIFY_SCREENS: (data: { bounds: Rectangle }[]) => OutputHelper.Identify.identifyScreens(data),
@@ -81,6 +85,12 @@ export class OutputHelper {
 
     static getAllOutputs() {
         return Object.entries(this.outputs).map(([id, output]) => ({ ...output, id }))
+    }
+
+    // the window a capture reads from: the offscreen surface when one exists, else the output's own window
+    static renderWindow(output: OutputData | undefined) {
+        const win = output?.captureWindow && !output.captureWindow.isDestroyed() ? output.captureWindow : output?.window
+        return win && !win.isDestroyed() ? win : undefined
     }
 
     static setOutput(id: string, output: OutputData) {
