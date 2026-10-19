@@ -27,7 +27,7 @@ Ranked by cost.
 1. **Per-consumer scaled targets do not exist off Windows.** `TargetsSupported()` returns false in
    `readback_mac.mm:557` and `readback_linux.cc:195`. That makes `OutputLifecycle.ts:793` set
    `cpuTargets`, which forces the main readback to uncompressed BGRA (`:798`), and then
-   `ndiWorker.ts:895-899` runs a native CPU box downscale plus a CPU colour convert **per target per
+   `ndiWorker.ts:895-899` runs a native CPU box downscale plus a CPU color convert **per target per
    frame**, with a further full-frame CPU convert of the main buffer at `:884`. On any Mac or Linux
    box with a working GPU, every mixed-resolution output group is scaled and converted on CPU cores.
 2. **I420 exists only in HLSL.** `ndiWorker.ts:618-654` is a pure JavaScript two-pass YUV conversion
@@ -77,8 +77,8 @@ fires whether or not a new frame exists.
   vector on the BGRA path that the UYVY path does not need. The video-layer `CopyResource` at
   `readback_win.cc:1534` is unconditional, so outputs with no live input pay a full GPU-to-GPU frame
   copy for a feature they are not using.
-- **Serialisation.** `shm.cc` uses one process-global mutex and the synchronous variants hold it
-  across the full-frame memcpy, so every ring in the process serialises. On Linux every consume and
+- **Serialization.** `shm.cc` uses one process-global mutex and the synchronous variants hold it
+  across the full-frame memcpy, so every ring in the process serializes. On Linux every consume and
   finish for every output funnels through a single GL thread with an uncapped queue
   (`readback_linux_gpu.cc:288-333`). `readback_win.cc:1457` busy-spins a libuv thread on the classic
   D3D11 path.
@@ -111,7 +111,7 @@ must never happen.
 Windows was also dropping the layer for two of its four main formats: a BGRA readback went through a
 plain copy and an RGBA one through a swizzle, and neither composited, so an output whose readback
 landed on either showed the transparent page over black. Both now run the compositing pass. That was a
-live bug in shipped behaviour, found by review rather than by testing.
+live bug in shipped behavior, found by review rather than by testing.
 
 ### 1.6 The two connection gates
 
@@ -214,7 +214,7 @@ not the way to do it.
 
 **2.6 Transfer, do not clone, the preview frame** in `PreviewStream.ts`.
 
-**2.7 Remove the remote-client `capturePage` path** in `servers.ts` in favour of the worker-produced
+**2.7 Remove the remote-client `capturePage` path** in `servers.ts` in favor of the worker-produced
 target.
 
 **2.8 Reduce per-frame main-thread bookkeeping.** The member and target plan should be built when the
@@ -232,7 +232,7 @@ changes `src/server/output_stream` as well as the sender, so it is its own piece
 allocating twice. Remove the BGRA intermediate in `readback_win.cc`. Make the video-layer
 `CopyResource` conditional on a layer actually being present.
 
-**3.2 Per-mapping locks in `shm.cc`** so rings stop serialising, and hold no lock across a memcpy.
+**3.2 Per-mapping locks in `shm.cc`** so rings stop serializing, and hold no lock across a memcpy.
 
 **3.3 Single-pass fan-out.** Produce all targets from one source read, or from a mip chain, instead of
 re-reading the full source per target.
@@ -292,7 +292,7 @@ checked against what Phases 1 and 3 actually changed, and none of them is made u
 |---|---|---|
 | `applyLinuxSwitches()` unthrottle switches | Chromium OSR starves paints without a begin-frame source | yes - nothing in Phase 1 or 3 touches paint delivery |
 | `updateOsrPaintDrive` (invalidate timer) | same starvation, driven explicitly | yes, same reason |
-| `avoidLinuxDisplaySizeShrink` | X11 subtracts 1px from a window matching a monitor exactly, giving an odd width the encoder refuses | yes - a window-manager behaviour, unrelated |
+| `avoidLinuxDisplaySizeShrink` | X11 subtracts 1px from a window matching a monitor exactly, giving an odd width the encoder refuses | yes - a window-manager behavior, unrelated |
 | `kImportFailDemotion` (CPU after 3 dmabuf import failures) | a real fallback, not a workaround | yes |
 | dmabuf planes vs a shared-texture handle | the platform's texture representation, not a workaround | keep |
 

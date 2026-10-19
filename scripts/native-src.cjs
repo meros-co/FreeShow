@@ -36,7 +36,7 @@ function hashDir(dir) {
     const h = crypto.createHash("sha1")
     for (const f of files) {
         h.update(f)
-        // normalise line endings: the checkout and the tarball copy can differ only by CRLF
+        // normalize line endings: the checkout and the tarball copy can differ only by CRLF
         h.update(fs.readFileSync(path.join(dir, f), "utf8").replace(/\r\n/g, "\n"))
     }
     return h.digest("hex")
