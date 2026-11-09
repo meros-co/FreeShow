@@ -295,7 +295,7 @@
                 // pixel format
                 let pixelFormats = (modeData.videoModes || []).map((format) => ({ name: format }))
                 updateBlackmagicData(pixelFormats, "pixelFormats")
-                updateBlackmagicData(pixelFormats[0]?.name, "pixelFormat")
+                updateBlackmagicData((newData.alphaKey && alphaPixelFormat(pixelFormats)) || pixelFormats[0]?.name, "pixelFormat")
 
                 // force resolution & update framerate
                 updateOutput("forcedResolution", { width: modeData.width, height: modeData.height })
@@ -308,6 +308,11 @@
                 })
             } else if (key === "pixelFormat" || key === "alphaKey" || key === "sdr") {
                 if (key === "alphaKey") updateOutput("transparent", value)
+                // the keyer only takes 8-bit ARGB or BGRA
+                if (key === "alphaKey" && value && !isAlphaPixelFormat(newData.pixelFormat)) {
+                    const format = alphaPixelFormat(newData.pixelFormats || [])
+                    if (format) return updateBlackmagicData(format, "pixelFormat")
+                }
                 setTimeout(() => {
                     if (newData.displayMode && newData.pixelFormat) send(OUTPUT, ["SET_VALUE"], { id: currentOutput?.id, key: "blackmagic", value: currentOutput })
                 })
@@ -344,6 +349,13 @@
         }
     }
     receive(BLACKMAGIC, receiveBMD, listenerId)
+
+    function isAlphaPixelFormat(format: string | undefined) {
+        return format === "8-bit BGRA" || format === "8-bit ARGB"
+    }
+    function alphaPixelFormat(formats: { name: string }[]) {
+        return formats.find((a) => a.name === "8-bit BGRA")?.name || formats.find((a) => a.name === "8-bit ARGB")?.name || ""
+    }
 
     // Check if alpha keying is supported by the device
     function isAlphaSupported(): boolean {
@@ -407,7 +419,7 @@
     {#if currentOutput?.blackmagicData?.deviceId}
         <InputRow>
             <MaterialDropdown label="settings.display_mode" value={currentOutput.blackmagicData?.displayMode} options={currentOutput.blackmagicData?.displayModes?.map((mode) => ({ label: mode.name, value: mode.name })) || []} on:change={(e) => updateBlackmagicData(e.detail, "displayMode")} />
-            <MaterialDropdown label="settings.pixel_format" value={currentOutput.blackmagicData?.pixelFormat} options={currentOutput.blackmagicData?.pixelFormats?.map((format) => ({ label: format.name, value: format.name })) || []} on:change={(e) => updateBlackmagicData(e.detail, "pixelFormat")} />
+            <MaterialDropdown label="settings.pixel_format" value={currentOutput.blackmagicData?.pixelFormat} options={(currentOutput.blackmagicData?.pixelFormats || []).filter((format) => !currentOutput?.blackmagicData?.alphaKey || isAlphaPixelFormat(format.name) || !alphaPixelFormat(currentOutput.blackmagicData.pixelFormats || [])).map((format) => ({ label: format.name, value: format.name }))} on:change={(e) => updateBlackmagicData(e.detail, "pixelFormat")} />
         </InputRow>
 
         {#if currentOutput.blackmagicData?.pixelFormat?.includes("YUV")}
