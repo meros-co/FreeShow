@@ -1,5 +1,7 @@
 import type { Size } from "electron"
 import { cardFormat } from "./cardFormat"
+import { ToMain } from "../../types/IPC/ToMain"
+import { sendToMain } from "../IPC/main"
 import { CaptureHelper } from "../capture/CaptureHelper"
 import { SenderCapture } from "../capture/SenderCapture"
 import { OutputHelper } from "../output/OutputHelper"
@@ -56,6 +58,9 @@ export class BlackmagicBridge {
             }
             case "bmdAudioQueued":
                 this.audioQueued = Number(msg.length) || 0
+                break
+            case "bmdNotice":
+                sendToMain(ToMain.TOAST, msg.message)
                 break
         }
     }

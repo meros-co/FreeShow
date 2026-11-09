@@ -114,6 +114,8 @@ export class BlackmagicSender {
 
     // Control state
     static isPaused: { [key: string]: boolean } = {}
+    // tells the user why a requested key output is not playing; set by the thread running playback
+    static onNotice: (message: string) => void = (message) => console.warn(message)
     private static readonly EMPTY_BUFFER = Buffer.alloc(0)
     private static readonly MAX_CONVERSION_BUFFER_BYTES = 128 * 1024 * 1024
     private static readonly CONVERSION_BUFFER_POOL_SIZE = 6
@@ -265,6 +267,7 @@ export class BlackmagicSender {
                                 for (const otherId of pausedOthers) BlackmagicSender.isPaused[otherId] = true
 
                                 const actualEnableKeying = enableKeying ? BlackmagicManager.isAlphaSupported(pixelFormat) : false
+                                if (enableKeying && !actualEnableKeying) BlackmagicSender.onNotice("toast.blackmagic_key_format")
 
                                 const playbackOptions: any = {
                                     deviceIndex,
@@ -280,6 +283,7 @@ export class BlackmagicSender {
                                     const devices = BlackmagicManager.getDevices()
                                     const device = devices[deviceIndex]
                                     playbackOptions.isExternal = device?.supportsExternalKeying ?? true
+                                    if (!playbackOptions.isExternal) BlackmagicSender.onNotice("toast.blackmagic_key_internal")
                                 }
 
                                 return macadam.playback(playbackOptions).finally(() => {
@@ -360,6 +364,7 @@ export class BlackmagicSender {
                 // If keying is not supported, retry without keying
                 if (enableKeying && (errorMessage.toLowerCase().includes("keying") || errorMessage.toLowerCase().includes("keyer"))) {
                     console.warn(`Blackmagic initialization failed due to keying issues. Retrying with keying disabled. Error: ${errorMessage}`)
+                    BlackmagicSender.onNotice("toast.blackmagic_key_failed")
                     enableKeying = false
                     attempts-- // Don't count this as a full attempt
                 }

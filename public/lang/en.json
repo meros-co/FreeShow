@@ -587,6 +587,9 @@
         "question_delete": "Would you like to delete?"
     },
     "toast": {
+        "blackmagic_key_format": "Alpha key needs the 8-bit BGRA or 8-bit ARGB pixel format. The Blackmagic output is sending fill only.",
+        "blackmagic_key_failed": "The Blackmagic device could not turn on its keyer. The output is sending fill only.",
+        "blackmagic_key_internal": "This Blackmagic device has no separate key output in its current setup, so the key is applied internally.",
         "saving": "Saving...",
         "saved": "Saved",
         "autosize_disabled": "Auto size disabled",

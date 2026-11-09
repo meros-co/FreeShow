@@ -1352,6 +1352,7 @@ export function runSenderWorker(adapters: SenderAdapter[]) {
                 // native conversion to the card's YUV modes for frames the GPU did not produce in them
                 const osrMod = loadOsrCapture()
                 if (osrMod && typeof osrMod.convertBgraToCard === "function") BlackmagicSender.nativeCardConvert = (frame, w, h, f, into) => osrMod.convertBgraToCard(frame, w, h, f, into)
+                BlackmagicSender.onNotice = (message) => port.postMessage({ type: "bmdNotice", message })
                 void BlackmagicSender.initialize(msg.outputId, msg.deviceIndex, msg.displayMode, msg.pixelFormat, msg.enableKeying, msg.audioChannels, msg.colorSpace).then(
                     () => bmdReportState(msg.outputId),
                     (err) => {
