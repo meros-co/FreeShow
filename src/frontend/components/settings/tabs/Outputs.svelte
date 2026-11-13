@@ -358,8 +358,9 @@
     }
 
     // Check if alpha keying is supported by the device
-    function isAlphaSupported(): boolean {
-        const device = blackmagicDevices.find((a) => a.id === currentOutput?.blackmagicData?.deviceId)
+    $: alphaSupported = isAlphaSupported(blackmagicDevices, currentOutput?.blackmagicData?.deviceId)
+    function isAlphaSupported(devices: Option[], deviceId: string | undefined): boolean {
+        const device = devices.find((a) => a.id === deviceId)
         if (!device) return false
         return device.data?.supportsInternalKeying || device.data?.supportsExternalKeying || false
     }
@@ -426,7 +427,7 @@
             <MaterialToggleSwitch label="SDR" title="SDR Encoding (Rec. 709)" checked={currentOutput.blackmagicData?.sdr !== false} defaultValue={true} on:change={(e) => updateBlackmagicData(e.detail, "sdr")} />
         {/if}
 
-        {#if isAlphaSupported()}
+        {#if alphaSupported}
             <MaterialToggleSwitch label="settings.alpha_key" checked={currentOutput.blackmagicData?.alphaKey} on:change={(e) => updateBlackmagicData(e.detail, "alphaKey")} />
         {/if}
     {/if}
